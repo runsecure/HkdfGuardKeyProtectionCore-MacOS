@@ -5,13 +5,13 @@
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 	<!--
-	 Add a keychain access group here once you know the Team ID / bundle prefix
-	 your Secure Enclave keys need to be shared under, e.g.:
-
-	 <key>keychain-access-groups</key>
-	 <array>
-	 	<string>$(AppIdentifierPrefix)com.hkdfguardkeyprotectionenclave.shared</string>
-	 </array>
+	 keychain-access-groups deliberately NOT declared here: capabilities
+	 like Keychain Sharing are enforced against a process's main executable,
+	 not each framework it loads, so Xcode won't even let this be added to
+	 a Framework target ("Capabilities are not available for this
+	 project"). If cross-process keychain sharing is ever needed, this
+	 entitlement belongs on the actual app target that embeds this
+	 framework, with the code updated to pass a matching kSecAttrAccessGroup.
 	-->
 </dict>
 </plist>

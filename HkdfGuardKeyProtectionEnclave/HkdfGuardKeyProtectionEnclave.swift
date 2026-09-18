@@ -8,14 +8,16 @@ import Security
 
 // MARK: - Configuration
 
-/// Keychain service/account used to persist the Secure Enclave key's opaque
-/// data representation. This is *not* the key material itself — a
+/// Keychain account used alongside the caller-supplied service identifier
+/// to persist the Secure Enclave key's opaque data representation. This is
+/// *not* the key material itself — a
 /// `SecureEnclave.P256.KeyAgreement.PrivateKey`'s `dataRepresentation` is an
 /// encrypted blob that only this device's Secure Enclave can turn back into
 /// a usable key; it cannot be used to recover the raw private key anywhere
-/// else.
-private let hkdfguardKeychainService = "com.hkdfguard.macos"
-private let hkdfguardKeychainAccount = "kek-v1"
+/// else. The service identifier varies per calling application (passed in
+/// from the C boundary); this account suffix stays fixed so each service's
+/// keychain item differs only by that identifier.
+let hkdfguardKeychainAccount = "kek-v1" // internal (not private) so @testable-import test code can clean up keychain items it creates
 
 /// Expected length of the Data Encryption Key being wrapped/unwrapped.
 private let hkdfguardDekLength = 32
@@ -38,6 +40,7 @@ private enum HKDFGuardStatus: Int32 {
     case encryptionFailed = -5
     case decryptionFailed = -6
     case unexpectedOutputLength = -7
+    case missingServiceIdentifier = -8
 }
 
 // MARK: - Secure Enclave KEK lookup / provisioning
@@ -55,11 +58,11 @@ private func makeAccessControl() -> SecAccessControl? {
 }
 
 /// Looks up the persisted Secure Enclave key's opaque data representation
-/// in the keychain.
-private func loadKEKDataRepresentation() -> Data? {
+/// in the keychain, under the caller-supplied service identifier.
+private func loadKEKDataRepresentation(service: String) -> Data? {
     let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: hkdfguardKeychainService,
+        kSecAttrService as String: service,
         kSecAttrAccount as String: hkdfguardKeychainAccount,
         kSecReturnData as String: true
     ]
@@ -71,28 +74,40 @@ private func loadKEKDataRepresentation() -> Data? {
 }
 
 /// Persists the Secure Enclave key's opaque data representation in the
-/// keychain, replacing any previous value.
+/// keychain, under the caller-supplied service identifier. Does not
+/// overwrite an existing item — `SecItemAdd` enforces a unique index on
+/// service+account, so if another caller has concurrently created one
+/// first, this simply (and correctly) fails rather than clobbering it;
+/// `getOrCreateKEK` below is what decides what to do next.
 @discardableResult
-private func storeKEKDataRepresentation(_ data: Data) -> Bool {
-    let query: [String: Any] = [
+private func storeKEKDataRepresentation(_ data: Data, service: String) -> Bool {
+    let attributes: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: hkdfguardKeychainService,
-        kSecAttrAccount as String: hkdfguardKeychainAccount
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: hkdfguardKeychainAccount,
+        kSecValueData as String: data,
+        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     ]
-    SecItemDelete(query as CFDictionary)
-
-    var attributes = query
-    attributes[kSecValueData as String] = data
-    attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
 }
 
-/// Returns the persisted Secure Enclave KEK, creating and persisting one on
-/// first use. The private key material never leaves the Secure Enclave;
-/// only an opaque, device-bound data representation is stored, and only
-/// that device's Secure Enclave can turn it back into a usable key.
-private func getOrCreateKEK() -> SecureEnclave.P256.KeyAgreement.PrivateKey? {
-    if let existing = loadKEKDataRepresentation(),
+/// Returns the persisted Secure Enclave KEK for the given service
+/// identifier, creating and persisting one on first use. Each distinct
+/// `service` string gets its own independent key, isolated from every
+/// other service's. The private key material never leaves the Secure
+/// Enclave; only an opaque, device-bound data representation is stored,
+/// and only that device's Secure Enclave can turn it back into a usable
+/// key.
+///
+/// This is safe under concurrent first-use (e.g. parallel test execution
+/// calling this before any KEK exists): if two callers both miss the load
+/// below and both generate a new SE key, `SecItemAdd`'s unique index on
+/// service+account lets only one of them actually persist theirs — the
+/// loser doesn't treat that as failure, it re-reads and converges on the
+/// winner's key instead. Without this, a concurrent first-use would
+/// non-deterministically report `keyUnavailable` for the losing callers.
+private func getOrCreateKEK(service: String) -> SecureEnclave.P256.KeyAgreement.PrivateKey? {
+    if let existing = loadKEKDataRepresentation(service: service),
        let key = try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: existing) {
         return key
     }
@@ -103,8 +118,16 @@ private func getOrCreateKEK() -> SecureEnclave.P256.KeyAgreement.PrivateKey? {
         return nil
     }
 
-    guard storeKEKDataRepresentation(newKey.dataRepresentation) else { return nil }
-    return newKey
+    if storeKEKDataRepresentation(newKey.dataRepresentation, service: service) {
+        return newKey
+    }
+
+    if let existing = loadKEKDataRepresentation(service: service),
+       let key = try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: existing) {
+        return key
+    }
+
+    return nil
 }
 
 /// Derives the AES-256 key used to seal/open the DEK from an ECDH shared
@@ -132,6 +155,7 @@ private func deriveWrappingKey(sharedSecret: SharedSecret, ephemeralPublicKeyRaw
 
 @_cdecl("hkdfguard_wrap_dek")
 public func hkdfguard_wrap_dek(
+    servicePtr: UnsafePointer<CChar>,
     dekPtr: UnsafePointer<UInt8>,
     dekLen: Int32,
     outPtr: UnsafeMutablePointer<UInt8>,
@@ -139,6 +163,11 @@ public func hkdfguard_wrap_dek(
 ) -> Int32 {
     guard dekLen == Int32(hkdfguardDekLength) else {
         return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+
+    let service = String(cString: servicePtr)
+    guard !service.isEmpty else {
+        return HKDFGuardStatus.missingServiceIdentifier.rawValue
     }
 
     // enclaveKey, ephemeralPrivateKey, sharedSecret, and wrappingKey are
@@ -152,7 +181,7 @@ public func hkdfguard_wrap_dek(
     let ephemeralPublicRaw: Data
     let sealedBox: AES.GCM.SealedBox
     do {
-        guard let enclaveKey = getOrCreateKEK() else {
+        guard let enclaveKey = getOrCreateKEK(service: service) else {
             return HKDFGuardStatus.keyUnavailable.rawValue
         }
 
@@ -204,6 +233,7 @@ public func hkdfguard_wrap_dek(
 
 @_cdecl("hkdfguard_unwrap_dek")
 public func hkdfguard_unwrap_dek(
+    servicePtr: UnsafePointer<CChar>,
     wrappedPtr: UnsafePointer<UInt8>,
     wrappedLen: Int32,
     outPtr: UnsafeMutablePointer<UInt8>,
@@ -211,6 +241,11 @@ public func hkdfguard_unwrap_dek(
 ) -> Int32 {
     guard wrappedLen > Int32(hkdfguardEphemeralPublicKeyLength) else {
         return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+
+    let service = String(cString: servicePtr)
+    guard !service.isEmpty else {
+        return HKDFGuardStatus.missingServiceIdentifier.rawValue
     }
 
     let ephemeralPublicRaw = Data(bytes: wrappedPtr, count: hkdfguardEphemeralPublicKeyLength)
@@ -233,7 +268,7 @@ public func hkdfguard_unwrap_dek(
     // before the length/capacity checks and memcpy that follow run.
     var plaintext: Data
     do {
-        guard let enclaveKey = getOrCreateKEK() else {
+        guard let enclaveKey = getOrCreateKEK(service: service) else {
             return HKDFGuardStatus.keyUnavailable.rawValue
         }
         guard let sharedSecret = try? enclaveKey.sharedSecretFromKeyAgreement(with: ephemeralPublicKey) else {
