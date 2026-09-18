@@ -22,7 +22,7 @@ FOUNDATION_EXPORT const unsigned char HkdfGuardKeyProtectionEnclaveVersionString
 
 // Status codes returned by both functions below:
 //    0  success
-//   -1  invalidInputLength     (dek_len / wrapped blob length is wrong)
+//   -1  invalidInputLength     (dek_len or wrapped_len is wrong)
 //   -2  outputBufferTooSmall   (*out_len is set to the required size)
 //   -3  keyUnavailable         (Secure Enclave key could not be obtained)
 //   -4  publicKeyUnavailable
@@ -45,8 +45,8 @@ int32_t hkdfguard_wrap_dek(
 
 int32_t hkdfguard_unwrap_dek(
     const char* service,
-    const uint8_t* dek,
-    int32_t dek_len,
+    const uint8_t* wrapped,
+    int32_t wrapped_len,
     uint8_t* out,
     int32_t* out_len
 );

@@ -4,6 +4,7 @@
 //
 
 import Testing
+import Foundation
 import Security
 @testable import HkdfGuardKeyProtectionEnclave
 
@@ -18,13 +19,22 @@ import Security
 ///   0 = success, -1 = invalidInputLength, -2 = outputBufferTooSmall,
 ///   -3 = keyUnavailable, -6 = decryptionFailed, -8 = missingServiceIdentifier.
 ///
-/// Each test uses its own distinct service identifier (rather than one
-/// shared default) so tests can run concurrently without racing on the
-/// same keychain item or leaving cross-test residue. Every test that
-/// actually provisions a Secure Enclave key registers a `defer` to delete
-/// that key's keychain item immediately after declaring the service
-/// string it'll use — `defer` runs on every exit path, including a
-/// failed `#expect`, so a failing test still leaves the keychain clean.
+/// This suite runs serialized (`.serialized` below), not in parallel:
+/// Swift Testing's default per-test parallelism was observed to hang the
+/// whole run — many tests simultaneously calling into the real Secure
+/// Enclave Processor (visible in a stack sample as multiple threads
+/// piled up inside `TKSEPClientTokenSession`/`TKSEPKey`) apparently
+/// exceeds whatever concurrency the SEP/securityd IPC layer actually
+/// supports, well short of a hardware or App Sandbox limit we're
+/// deliberately imposing. Each test still uses its own distinct service
+/// identifier (rather than one shared default) so failures stay isolated
+/// and easy to attribute to a specific test even though everything now
+/// runs one at a time. Every test that actually provisions a Secure
+/// Enclave key registers a `defer` to delete that key's keychain item
+/// immediately after declaring the service string it'll use — `defer`
+/// runs on every exit path, including a failed `#expect`, so a failing
+/// test still leaves the keychain clean.
+@Suite(.serialized)
 struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
 
     // MARK: - Helpers
@@ -174,7 +184,7 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         #expect(result.status == -8) // missingServiceIdentifier
     }
 
-    @Test func concurrentFirstUseOfSameServiceConvergesOnOneKEK() async {
+    @Test func concurrentFirstUseOfSameServiceConvergesOnOneKEK() {
         // Regression test: getOrCreateKEK() used to report keyUnavailable
         // (-3) non-deterministically when multiple callers raced to
         // create the very first keychain item for a service at the same
@@ -183,23 +193,38 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // winner's key rather than treating that as failure). Using a
         // never-before-seen service identifier here forces every task
         // through that first-use race on every run.
+        //
+        // This deliberately uses DispatchQueue.concurrentPerform (real OS
+        // threads from GCD's pool) rather than Swift's async/withTaskGroup:
+        // hkdfguard_wrap_dek makes synchronous, blocking Security-framework
+        // calls, and Swift Concurrency's cooperative thread pool has a
+        // limited number of threads that assume tasks suspend via `await`
+        // rather than block outright. Spawning several blocking calls via
+        // withTaskGroup here — on top of Swift Testing's own default
+        // per-test parallelism — was enough to exhaust that pool and
+        // deadlock the entire test run, observed directly (every thread
+        // parked in the Testing runner's scheduler, no forward progress).
+        // GCD's pool is designed for exactly this kind of blocking work.
         let service = "com.hkdfguard.tests.concurrent-first-use.\(UUID().uuidString)"
         defer { Self.deleteKEK(service: service) }
         let dek = Self.randomDEK()
 
-        let statuses = await withTaskGroup(of: Int32.self) { group in
-            for _ in 0..<8 {
-                group.addTask {
-                    Self.wrap(dek, service: service).status
-                }
-            }
-            var results: [Int32] = []
-            for await status in group {
-                results.append(status)
-            }
-            return results
+        let lock = NSLock()
+        var statuses: [Int32] = []
+
+        // 3 concurrent creators is enough to exercise the unique-index
+        // race (needs >=2); observed directly that pushing much more
+        // simultaneous load at the real Secure Enclave/securityd IPC
+        // layer causes severe contention on this hardware, so this stays
+        // deliberately modest rather than maximizing concurrency.
+        DispatchQueue.concurrentPerform(iterations: 3) { _ in
+            let status = Self.wrap(dek, service: service).status
+            lock.lock()
+            statuses.append(status)
+            lock.unlock()
         }
 
+        #expect(statuses.count == 3)
         #expect(statuses.allSatisfy { $0 == 0 })
     }
 
