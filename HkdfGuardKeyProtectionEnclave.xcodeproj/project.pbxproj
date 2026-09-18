@@ -1,0 +1,585 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 70;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A5982B6B0203454B85A86462 /* HkdfGuardKeyProtectionEnclave.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219DF893D63442E9B2C50B4A /* HkdfGuardKeyProtectionEnclave.framework */; };
+		B16F94D28F484D4CBFAA263E /* HkdfGuardKeyProtectionEnclave.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FDB1512DACA46AC9A6F7B19 /* HkdfGuardKeyProtectionEnclave.swift */; };
+		E5F23DE693EE4DF9A2E335D0 /* HkdfGuardKeyProtectionEnclave.h in Headers */ = {isa = PBXBuildFile; fileRef = 6F7623D1D4864AF684EF4BEE /* HkdfGuardKeyProtectionEnclave.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		9A8F3F2E610A4537A82FD401 /* HkdfGuardKeyProtectionEnclave.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FDB1512DACA46AC9A6F7B19 /* HkdfGuardKeyProtectionEnclave.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		8DC8B09274EF486CA86B65D4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F991AE875E72455C862E99FC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E98493A6F0084622A53E8C41;
+			remoteInfo = HkdfGuardKeyProtectionEnclave;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		219DF893D63442E9B2C50B4A /* HkdfGuardKeyProtectionEnclave.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = HkdfGuardKeyProtectionEnclave.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		5163436780C947B1A0E2BAC7 /* HkdfGuardKeyProtectionEnclave.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HkdfGuardKeyProtectionEnclave.entitlements; sourceTree = "<group>"; };
+		6F7623D1D4864AF684EF4BEE /* HkdfGuardKeyProtectionEnclave.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HkdfGuardKeyProtectionEnclave.h; sourceTree = "<group>"; };
+		9FDB1512DACA46AC9A6F7B19 /* HkdfGuardKeyProtectionEnclave.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HkdfGuardKeyProtectionEnclave.swift; sourceTree = "<group>"; };
+		A8009863305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HkdfGuardKeyProtectionEnclaveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB5BB5BC98F7425A9B7B35FB /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		26F6201A383E44E0B578B634 /* hkdfguardkeyprotectionenclave.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = hkdfguardkeyprotectionenclave.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A8009867305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = HkdfGuardKeyProtectionEnclaveTests; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A8009860305CDD39003A51EC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A5982B6B0203454B85A86462 /* HkdfGuardKeyProtectionEnclave.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AD234A29BAE5486FB3D28656 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		04F332B9242D4D98A0C58AD0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		04CE6420354E4779808F6ACC /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				219DF893D63442E9B2C50B4A /* HkdfGuardKeyProtectionEnclave.framework */,
+				A8009863305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests.xctest */,
+				26F6201A383E44E0B578B634 /* hkdfguardkeyprotectionenclave.dylib */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8F09BF0B00804FF499E38A19 = {
+			isa = PBXGroup;
+			children = (
+				95AAC891B3674E0989355D62 /* HkdfGuardKeyProtectionEnclave */,
+				A8009867305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests */,
+				04CE6420354E4779808F6ACC /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		95AAC891B3674E0989355D62 /* HkdfGuardKeyProtectionEnclave */ = {
+			isa = PBXGroup;
+			children = (
+				9FDB1512DACA46AC9A6F7B19 /* HkdfGuardKeyProtectionEnclave.swift */,
+				6F7623D1D4864AF684EF4BEE /* HkdfGuardKeyProtectionEnclave.h */,
+				AB5BB5BC98F7425A9B7B35FB /* Info.plist */,
+				5163436780C947B1A0E2BAC7 /* HkdfGuardKeyProtectionEnclave.entitlements */,
+			);
+			path = HkdfGuardKeyProtectionEnclave;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		81417817673F4983BFAA8311 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E5F23DE693EE4DF9A2E335D0 /* HkdfGuardKeyProtectionEnclave.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		A8009862305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A800986D305CDD39003A51EC /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclaveTests" */;
+			buildPhases = (
+				A800985F305CDD39003A51EC /* Sources */,
+				A8009860305CDD39003A51EC /* Frameworks */,
+				A8009861305CDD39003A51EC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E5936094D179436C850201E8 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A8009867305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests */,
+			);
+			name = HkdfGuardKeyProtectionEnclaveTests;
+			packageProductDependencies = (
+			);
+			productName = HkdfGuardKeyProtectionEnclaveTests;
+			productReference = A8009863305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		E98493A6F0084622A53E8C41 /* HkdfGuardKeyProtectionEnclave */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 629E9D326FB54B20ADB9E34B /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclave" */;
+			buildPhases = (
+				81417817673F4983BFAA8311 /* Headers */,
+				448D9A307ABA41B59A40E533 /* Sources */,
+				AD234A29BAE5486FB3D28656 /* Frameworks */,
+				E9F721DCD7F84A109F0D676B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HkdfGuardKeyProtectionEnclave;
+			productName = HkdfGuardKeyProtectionEnclave;
+			productReference = 219DF893D63442E9B2C50B4A /* HkdfGuardKeyProtectionEnclave.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		FF27DBFDA52E432DA1F55DD4 /* HkdfGuardKeyProtectionEnclaveDylib */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AEA5DD471FE041EA89A63C81 /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclaveDylib" */;
+			buildPhases = (
+				1A54B81E5D73480AA1388F3E /* Sources */,
+				04F332B9242D4D98A0C58AD0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HkdfGuardKeyProtectionEnclaveDylib;
+			productName = hkdfguardkeyprotectionenclave;
+			productReference = 26F6201A383E44E0B578B634 /* hkdfguardkeyprotectionenclave.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F991AE875E72455C862E99FC /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					A8009862305CDD39003A51EC = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					E98493A6F0084622A53E8C41 = {
+						CreatedOnToolsVersion = 16.0;
+						ProvisioningStyle = Automatic;
+					};
+					FF27DBFDA52E432DA1F55DD4 = {
+						CreatedOnToolsVersion = 27.0;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 062AB6963D4446238919586F /* Build configuration list for PBXProject "HkdfGuardKeyProtectionEnclave" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8F09BF0B00804FF499E38A19;
+			productRefGroup = 04CE6420354E4779808F6ACC /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E98493A6F0084622A53E8C41 /* HkdfGuardKeyProtectionEnclave */,
+				A8009862305CDD39003A51EC /* HkdfGuardKeyProtectionEnclaveTests */,
+				FF27DBFDA52E432DA1F55DD4 /* HkdfGuardKeyProtectionEnclaveDylib */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A8009861305CDD39003A51EC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E9F721DCD7F84A109F0D676B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		448D9A307ABA41B59A40E533 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B16F94D28F484D4CBFAA263E /* HkdfGuardKeyProtectionEnclave.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A800985F305CDD39003A51EC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A54B81E5D73480AA1388F3E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A8F3F2E610A4537A82FD401 /* HkdfGuardKeyProtectionEnclave.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E5936094D179436C850201E8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E98493A6F0084622A53E8C41 /* HkdfGuardKeyProtectionEnclave */;
+			targetProxy = 8DC8B09274EF486CA86B65D4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2F6420DA10FD421BB64C58C6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HkdfGuardKeyProtectionEnclave/HkdfGuardKeyProtectionEnclave.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HkdfGuardKeyProtectionEnclave/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
+				MARKETING_VERSION = 0.1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.keyprotectioncore.HkdfGuardKeyProtectionEnclave;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		3FB4109EE1A64EF9B4C3C809 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		95C5EC5792B24A7DB6281494 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		99B25FC7D4AB4094AFF49F1F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = HkdfGuardKeyProtectionEnclave/HkdfGuardKeyProtectionEnclave.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HkdfGuardKeyProtectionEnclave/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
+				MARKETING_VERSION = 0.1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = com.keyprotectioncore.HkdfGuardKeyProtectionEnclave;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A800986E305CDD39003A51EC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = runsecure.HkdfGuardKeyProtectionEnclaveTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 27.0;
+			};
+			name = Debug;
+		};
+		A800986F305CDD39003A51EC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = runsecure.HkdfGuardKeyProtectionEnclaveTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 27.0;
+			};
+			name = Release;
+		};
+		D7FFFC18E9A1416FB6ADC4F4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				EXECUTABLE_PREFIX = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = hkdfguardkeyprotectionenclave;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		7964F9A6A30A498C87F16BC6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = MFW3T8R8J3;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				EXECUTABLE_PREFIX = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = hkdfguardkeyprotectionenclave;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		062AB6963D4446238919586F /* Build configuration list for PBXProject "HkdfGuardKeyProtectionEnclave" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3FB4109EE1A64EF9B4C3C809 /* Debug */,
+				95C5EC5792B24A7DB6281494 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		629E9D326FB54B20ADB9E34B /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclave" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				99B25FC7D4AB4094AFF49F1F /* Debug */,
+				2F6420DA10FD421BB64C58C6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A800986D305CDD39003A51EC /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclaveTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A800986E305CDD39003A51EC /* Debug */,
+				A800986F305CDD39003A51EC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AEA5DD471FE041EA89A63C81 /* Build configuration list for PBXNativeTarget "HkdfGuardKeyProtectionEnclaveDylib" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D7FFFC18E9A1416FB6ADC4F4 /* Debug */,
+				7964F9A6A30A498C87F16BC6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F991AE875E72455C862E99FC /* Project object */;
+}
