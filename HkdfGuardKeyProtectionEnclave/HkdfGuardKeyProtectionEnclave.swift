@@ -135,7 +135,7 @@ private func getOrCreateKEK(service: String) -> SecureEnclave.P256.KeyAgreement.
 /// derived key to this specific exchange.
 private func deriveWrappingKey(sharedSecret: SharedSecret, ephemeralPublicKeyRaw: Data) -> SymmetricKey {
     sharedSecret.hkdfDerivedSymmetricKey(
-        using: SHA256.self,
+        using: SHA512.self,
         salt: ephemeralPublicKeyRaw,
         sharedInfo: hkdfguardSharedInfo,
         outputByteCount: 32
@@ -148,7 +148,7 @@ private func deriveWrappingKey(sharedSecret: SharedSecret, ephemeralPublicKeyRaw
 //                  [AES-GCM combined: 12-byte nonce || ciphertext || 16-byte tag]
 //
 // This is a manual ECIES construction — ephemeral ECDH (with the Secure
-// Enclave doing the enclave-side scalar multiplication) + HKDF-SHA256 +
+// Enclave doing the enclave-side scalar multiplication) + HKDF-SHA512 +
 // AES-GCM — replacing the earlier Security.framework
 // `SecKeyCreateEncryptedData`/`CFData` based approach with CryptoKit's
 // native Secure Enclave key-agreement API.
@@ -199,9 +199,19 @@ public func hkdfguard_wrap_dek(
         // Seal directly from the caller's buffer — CryptoKit accepts any
         // `DataProtocol` source, including a raw pointer, so the
         // plaintext DEK is never staged in a Swift-owned copy on this
-        // side at all.
+        // side at all. `authenticating: service` binds this ciphertext to
+        // the exact service it was wrapped for: presenting a genuine,
+        // still-decryptable-by-the-same-KEK payload under a different
+        // service string is caught by AES-GCM authentication rather than
+        // silently succeeding, matching this project's Linux
+        // implementation (crypto.rs's `wrap`/`unwrap` use the identical
+        // `service.as_bytes()` AAD).
         do {
-            sealedBox = try AES.GCM.seal(UnsafeRawBufferPointer(start: dekPtr, count: Int(dekLen)), using: wrappingKey)
+            sealedBox = try AES.GCM.seal(
+                UnsafeRawBufferPointer(start: dekPtr, count: Int(dekLen)),
+                using: wrappingKey,
+                authenticating: Data(service.utf8)
+            )
         } catch {
             return HKDFGuardStatus.encryptionFailed.rawValue
         }
@@ -275,8 +285,13 @@ public func hkdfguard_unwrap_dek(
             return HKDFGuardStatus.decryptionFailed.rawValue
         }
         let wrappingKey = deriveWrappingKey(sharedSecret: sharedSecret, ephemeralPublicKeyRaw: ephemeralPublicRaw)
+        // Must match the AAD used in hkdfguard_wrap_dek above: the same
+        // `service` string passed into this call. A mismatch (wrong
+        // service, or a payload wrapped before this AAD was introduced)
+        // surfaces as an ordinary authentication failure here, not a
+        // crash or a special-cased error path.
         do {
-            plaintext = try AES.GCM.open(sealedBox, using: wrappingKey)
+            plaintext = try AES.GCM.open(sealedBox, using: wrappingKey, authenticating: Data(service.utf8))
         } catch {
             return HKDFGuardStatus.decryptionFailed.rawValue
         }

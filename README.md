@@ -23,7 +23,7 @@ To wrap a 32-byte DEK:
 2. Perform ECDH between the ephemeral private key and the service's Secure
    Enclave public key (the enclave does its side of the exchange in
    hardware).
-3. Derive an AES-256 key from the resulting shared secret via HKDF-SHA256,
+3. Derive an AES-256 key from the resulting shared secret via HKDF-SHA512,
    salted with the ephemeral public key.
 4. Encrypt the DEK with AES-GCM under that derived key.
 5. Output the ephemeral public key alongside the AES-GCM ciphertext — the
