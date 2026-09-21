@@ -5,7 +5,6 @@
 
 import Testing
 import Foundation
-import Security
 @testable import HkdfGuardKeyProtectionEnclave
 
 /// Exercises the actual `hkdfguard-v1-initialize` command-line tool
@@ -192,13 +191,26 @@ struct HkdfGuardCommandLineToolTests {
         (0..<dekLength).map { _ in UInt8.random(in: .min ... .max) }
     }
 
+    /// Deletes the keychain item for `service`, via the `security` CLI
+    /// rather than a direct `SecItemDelete` call. This isn't stylistic:
+    /// every KEK this suite needs to clean up was created by the separate,
+    /// differently-signed `hkdfguard-v1-initialize` process, and a plain
+    /// `SecItemDelete` from *this* process (the test host) against such an
+    /// item fails outright — confirmed directly while developing this
+    /// suite, returning errSecInvalidOwnerEdit (-25244, "Invalid attempt
+    /// to change the owner of this item"), silently, no interactive prompt
+    /// at all (unlike the *read* path — see the suite's doc comment).
+    /// `/usr/bin/security`, an Apple-signed platform binary, has broader
+    /// keychain trust than an arbitrary third-party process and reliably
+    /// succeeds where `SecItemDelete` here does not.
     private static func deleteKEK(service: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: hkdfguardKeychainAccount
-        ]
-        SecItemDelete(query as CFDictionary)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["delete-generic-password", "-s", service, "-a", hkdfguardKeychainAccount]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
     }
 
     /// The "application code" side of every test below: calls
