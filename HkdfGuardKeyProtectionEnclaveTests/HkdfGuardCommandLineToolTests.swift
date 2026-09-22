@@ -5,6 +5,7 @@
 
 import Testing
 import Foundation
+import CryptoKit
 @testable import HkdfGuardKeyProtectionEnclave
 
 /// Exercises the actual `hkdfguard-v1-initialize` command-line tool
@@ -57,7 +58,12 @@ import Foundation
 /// whichever test happens to run first.
 ///
 /// `.serialized` for the same Secure Enclave/SEP concurrency reason as
-/// `HkdfGuardKeyProtectionEnclaveWrapUnwrapTests`.
+/// `HkdfGuardKeyProtectionEnclaveWrapUnwrapTests`. Every test that actually
+/// exercises the CLI's wrap path is additionally gated on
+/// `SecureEnclave.isAvailable` — see `secureEnclaveAvailableComment` below
+/// — so this suite degrades gracefully to just its pure argument-handling
+/// tests (`cliRejects*`, `cliPrintsUsageOnHelp`) on a CI/VM runner with no
+/// real Secure Enclave, rather than failing outright.
 @Suite(.serialized)
 struct HkdfGuardCommandLineToolTests {
 
@@ -80,6 +86,19 @@ struct HkdfGuardCommandLineToolTests {
 
     private static let interactiveKeychainAccessComment: Comment =
         "requires a one-time interactive keychain approval; set HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1 to opt in — see this suite's doc comment"
+
+    /// Every test below that actually runs the CLI's wrap path needs a
+    /// real Secure Enclave — on a CI/VM runner (`SecureEnclave.isAvailable
+    /// == false`), the CLI itself would fail with `keyUnavailable` before
+    /// any of what these tests are checking even comes into play. Folded
+    /// into `interactiveKeychainAccessEnabled` below for the four tests
+    /// that need both gates; used alone for the one default-running test
+    /// that wraps but doesn't cross the interactive-keychain boundary.
+    private static let secureEnclaveAvailableComment: Comment =
+        "requires a real Secure Enclave — not available on CI/VM runners; run on real Mac hardware before committing/requesting a build"
+
+    private static let interactiveKeychainAndSecureEnclaveComment: Comment =
+        "requires a real Secure Enclave and a one-time interactive keychain approval; set HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1 on real Mac hardware to opt in — see this suite's doc comment"
 
     // MARK: - Locating and building the tool this suite exercises
 
@@ -248,7 +267,7 @@ struct HkdfGuardCommandLineToolTests {
 
     // MARK: - Round trip: CLI wraps, application code decrypts
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
+    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliWrappedDekIsRecoveredByApplicationCode() throws {
         let service = "com.hkdfguard.tests.cli.roundtrip"
         // The CLI derives its actual KEK service string as
@@ -275,7 +294,8 @@ struct HkdfGuardCommandLineToolTests {
         #expect(recovered.dek == dek)
     }
 
-    @Test func cliWrappedFileHasExpectedLengthAndPermissions() throws {
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliWrappedFileHasExpectedLengthAndPermissions() throws {
         let service = "com.hkdfguard.tests.cli.file.attributes"
         defer { Self.deleteKEK(service: "\(service).1") }
 
@@ -298,7 +318,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(wrapped.count == 124) // 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
     }
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
+    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func differentMaterialIdentifiersAreIsolatedThroughTheRealCLI() throws {
         // Confirms the "<service-name>.<material-identifier>" convention
         // is actually wired correctly end to end through the CLI's own
@@ -334,7 +354,7 @@ struct HkdfGuardCommandLineToolTests {
 
     // MARK: - File handling: refuses to clobber, --force overwrites correctly
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
+    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliRefusesToOverwriteWithoutForce() throws {
         let service = "com.hkdfguard.tests.cli.no.overwrite"
         defer { Self.deleteKEK(service: "\(service).1") }
@@ -366,7 +386,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(recovered.dek == firstDek)
     }
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
+    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliForceOverwritesWithNewDek() throws {
         let service = "com.hkdfguard.tests.cli.force.overwrite"
         defer { Self.deleteKEK(service: "\(service).1") }

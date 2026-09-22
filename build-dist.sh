@@ -9,6 +9,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$ROOT/dist"
 
+# Signing identity used for both artifacts below. The dylib target's own
+# CODE_SIGN_STYLE=Automatic already resolves to this same identity on its
+# own; the CLI needs it passed explicitly (see the codesign call further
+# down), so both are driven from one place here. Override with
+# HKDFGUARD_SIGN_IDENTITY=... to sign with something else (e.g. a
+# "Developer ID Application" identity for wider distribution) without
+# editing this script.
+SIGN_IDENTITY="${HKDFGUARD_SIGN_IDENTITY:-Apple Development}"
+
 echo "==> Building HkdfGuardKeyProtectionEnclaveDylib (Release)"
 xcodebuild -project "$ROOT/HkdfGuardKeyProtectionEnclave.xcodeproj" \
     -target HkdfGuardKeyProtectionEnclaveDylib \
@@ -43,10 +52,9 @@ CLI_DIST="$DIST/hkdfguard-v1-initialize"
 install_name_tool -delete_rpath "$ROOT/build/Release" "$CLI_DIST"
 install_name_tool -add_rpath "@executable_path" "$CLI_DIST"
 # install_name_tool invalidates whatever signature the linker produced;
-# re-sign ad hoc (no identity, no entitlements needed for a bare CLI) so
-# dyld/Gatekeeper will still run it, including on Apple Silicon, where an
-# unsigned binary simply won't launch at all.
-codesign --sign - --force "$CLI_DIST"
+# re-sign with the real identity above (not ad hoc) so what ends up in
+# dist/ is an actually-signed build, matching the dylib next to it.
+codesign --sign "$SIGN_IDENTITY" --force "$CLI_DIST"
 
 echo "==> Done:"
 ls -la "$DIST"

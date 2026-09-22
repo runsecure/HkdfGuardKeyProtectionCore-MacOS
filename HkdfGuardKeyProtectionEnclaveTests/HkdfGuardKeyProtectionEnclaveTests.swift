@@ -5,6 +5,7 @@
 
 import Testing
 import Foundation
+import CryptoKit
 import Security
 @testable import HkdfGuardKeyProtectionEnclave
 
@@ -34,7 +35,13 @@ import Security
 /// immediately after declaring the service string it'll use — `defer`
 /// runs on every exit path, including a failed `#expect`, so a failing
 /// test still leaves the keychain clean.
-@Suite(.serialized)
+@Suite(
+    .serialized,
+    .enabled(
+        if: SecureEnclave.isAvailable,
+        "requires a real Secure Enclave — not available on CI/VM runners (e.g. GitHub-hosted macOS runners, where Apple's Virtualization framework doesn't pass the Secure Enclave through to the guest); run this suite on real Mac hardware before committing/requesting a build"
+    )
+)
 struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
 
     // MARK: - Helpers
