@@ -270,10 +270,7 @@ struct HkdfGuardCommandLineToolTests {
     @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliWrappedDekIsRecoveredByApplicationCode() throws {
         let service = "com.hkdfguard.tests.cli.roundtrip"
-        // The CLI derives its actual KEK service string as
-        // "<service-name>.<material-identifier>" — see main.swift's `run`
-        // — so that's the item that must be cleaned up, not the bare name.
-        defer { Self.deleteKEK(service: "\(service).1") }
+        defer { Self.deleteKEK(service: service) }
 
         let dek = Self.randomDEK()
         let keyFilePath = Self.makeTempFilePath()
@@ -281,7 +278,6 @@ struct HkdfGuardCommandLineToolTests {
 
         let result = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(dek).base64EncodedString()
         ])
@@ -289,7 +285,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(FileManager.default.fileExists(atPath: keyFilePath))
 
         let wrapped = try Array(Data(contentsOf: URL(fileURLWithPath: keyFilePath)))
-        let recovered = Self.unwrapInApplicationCode(wrapped, service: "\(service).1")
+        let recovered = Self.unwrapInApplicationCode(wrapped, service: service)
         #expect(recovered.status == 0)
         #expect(recovered.dek == dek)
     }
@@ -297,14 +293,13 @@ struct HkdfGuardCommandLineToolTests {
     @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
     func cliWrappedFileHasExpectedLengthAndPermissions() throws {
         let service = "com.hkdfguard.tests.cli.file.attributes"
-        defer { Self.deleteKEK(service: "\(service).1") }
+        defer { Self.deleteKEK(service: service) }
 
         let keyFilePath = Self.makeTempFilePath()
         defer { try? FileManager.default.removeItem(atPath: keyFilePath) }
 
         let result = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(Self.randomDEK()).base64EncodedString()
         ])
@@ -318,46 +313,12 @@ struct HkdfGuardCommandLineToolTests {
         #expect(wrapped.count == 124) // 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
     }
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
-    func differentMaterialIdentifiersAreIsolatedThroughTheRealCLI() throws {
-        // Confirms the "<service-name>.<material-identifier>" convention
-        // is actually wired correctly end to end through the CLI's own
-        // argument handling, not just asserted in a comment — application
-        // code unwrapping under the wrong material identifier must fail.
-        let service = "com.hkdfguard.tests.cli.material.isolation"
-        defer {
-            Self.deleteKEK(service: "\(service).1")
-            Self.deleteKEK(service: "\(service).2")
-        }
-
-        let dek = Self.randomDEK()
-        let keyFilePath = Self.makeTempFilePath()
-        defer { try? FileManager.default.removeItem(atPath: keyFilePath) }
-
-        let result = try Self.runCLI([
-            keyFilePath,
-            "--material-identifier", "1",
-            "--service-name", service,
-            "--dek", Data(dek).base64EncodedString()
-        ])
-        #expect(result.exitCode == 0, "CLI failed: \(result.stderr)")
-
-        let wrapped = try Array(Data(contentsOf: URL(fileURLWithPath: keyFilePath)))
-
-        let wrongMaterial = Self.unwrapInApplicationCode(wrapped, service: "\(service).2")
-        #expect(wrongMaterial.status != 0)
-
-        let rightMaterial = Self.unwrapInApplicationCode(wrapped, service: "\(service).1")
-        #expect(rightMaterial.status == 0)
-        #expect(rightMaterial.dek == dek)
-    }
-
     // MARK: - File handling: refuses to clobber, --force overwrites correctly
 
     @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliRefusesToOverwriteWithoutForce() throws {
         let service = "com.hkdfguard.tests.cli.no.overwrite"
-        defer { Self.deleteKEK(service: "\(service).1") }
+        defer { Self.deleteKEK(service: service) }
 
         let firstDek = Self.randomDEK()
         let keyFilePath = Self.makeTempFilePath()
@@ -365,7 +326,6 @@ struct HkdfGuardCommandLineToolTests {
 
         let firstResult = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(firstDek).base64EncodedString()
         ])
@@ -373,7 +333,6 @@ struct HkdfGuardCommandLineToolTests {
 
         let secondResult = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(Self.randomDEK()).base64EncodedString()
         ])
@@ -381,7 +340,7 @@ struct HkdfGuardCommandLineToolTests {
 
         // The original file, and the DEK it wraps, must be untouched.
         let wrapped = try Array(Data(contentsOf: URL(fileURLWithPath: keyFilePath)))
-        let recovered = Self.unwrapInApplicationCode(wrapped, service: "\(service).1")
+        let recovered = Self.unwrapInApplicationCode(wrapped, service: service)
         #expect(recovered.status == 0)
         #expect(recovered.dek == firstDek)
     }
@@ -389,14 +348,13 @@ struct HkdfGuardCommandLineToolTests {
     @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliForceOverwritesWithNewDek() throws {
         let service = "com.hkdfguard.tests.cli.force.overwrite"
-        defer { Self.deleteKEK(service: "\(service).1") }
+        defer { Self.deleteKEK(service: service) }
 
         let keyFilePath = Self.makeTempFilePath()
         defer { try? FileManager.default.removeItem(atPath: keyFilePath) }
 
         let firstResult = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(Self.randomDEK()).base64EncodedString()
         ])
@@ -405,7 +363,6 @@ struct HkdfGuardCommandLineToolTests {
         let secondDek = Self.randomDEK()
         let secondResult = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", service,
             "--dek", Data(secondDek).base64EncodedString(),
             "--force"
@@ -413,7 +370,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(secondResult.exitCode == 0, "CLI --force failed: \(secondResult.stderr)")
 
         let wrapped = try Array(Data(contentsOf: URL(fileURLWithPath: keyFilePath)))
-        let recovered = Self.unwrapInApplicationCode(wrapped, service: "\(service).1")
+        let recovered = Self.unwrapInApplicationCode(wrapped, service: service)
         #expect(recovered.status == 0)
         #expect(recovered.dek == secondDek)
     }
@@ -426,7 +383,6 @@ struct HkdfGuardCommandLineToolTests {
 
         let result = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", "com.hkdfguard.tests.cli.bad.dek",
             "--dek", "not-valid-base64!!"
         ])
@@ -440,7 +396,6 @@ struct HkdfGuardCommandLineToolTests {
 
         let result = try Self.runCLI([
             keyFilePath,
-            "--material-identifier", "1",
             "--service-name", "com.hkdfguard.tests.cli.short.dek",
             "--dek", Data([UInt8](repeating: 0, count: 16)).base64EncodedString()
         ])

@@ -11,14 +11,11 @@
 // difference (POSIX 0640 permissions on the output file), specific to this
 // platform for now.
 //
-// The KEK's `service` identity is `<service-name>.<material-identifier>`:
-// the material identifier lets one logical service own up to 256 distinct
-// KEKs (e.g. for key rotation), each addressed by its own `service` string
-// under the hood.
+// The KEK's `service` identity is exactly the caller-supplied
+// `--service-name`; there is no further structure to it.
 //
 // Usage:
 //   hkdfguard-v1-initialize <key-file-path> \
-//       --material-identifier|-mi <1-256> \
 //       --service-name|-sn <name> \
 //       --dek|-d <base64> \
 //       [--force|-f]
@@ -97,8 +94,6 @@ func describeStatus(_ code: Int32) -> String {
 // MARK: - Argument parsing
 
 let programName = "hkdfguard-v1-initialize"
-let materialIdentifierMin: Int32 = 1
-let materialIdentifierMax: Int32 = 256
 let dekLen = 32
 // Generous starting capacity for the wrapped payload -- retried once at
 // the library-reported size on outputBufferTooSmall, so this only needs to
@@ -108,7 +103,6 @@ let initialWrappedCapacity = 512
 
 struct Args {
     var keyFilePath: String
-    var materialIdentifier: Int32
     var serviceName: String
     var dekBase64: String
     var force: Bool
@@ -121,14 +115,13 @@ enum ParseOutcome {
 
 func printUsage() {
     FileHandle.standardError.write(
-        "Usage: \(programName) <key-file-path> --material-identifier|-mi <\(materialIdentifierMin)-\(materialIdentifierMax)> --service-name|-sn <name> --dek|-d <base64> [--force|-f]\n"
+        "Usage: \(programName) <key-file-path> --service-name|-sn <name> --dek|-d <base64> [--force|-f]\n"
             .data(using: .utf8)!
     )
 }
 
 func parseArgs(_ arguments: [String]) throws -> ParseOutcome {
     var keyFilePath: String?
-    var materialIdentifier: Int32?
     var serviceName: String?
     var dekBase64: String?
     var force = false
@@ -140,19 +133,6 @@ func parseArgs(_ arguments: [String]) throws -> ParseOutcome {
             return .help
         case "--force", "-f":
             force = true
-        case "--material-identifier", "-mi":
-            guard let value = iterator.next() else {
-                throw CLIError("\(arg) requires a value")
-            }
-            guard let parsed = Int32(value) else {
-                throw CLIError("--material-identifier must be an integer, got \"\(value)\"")
-            }
-            guard (materialIdentifierMin...materialIdentifierMax).contains(parsed) else {
-                throw CLIError(
-                    "--material-identifier must be between \(materialIdentifierMin) and \(materialIdentifierMax), got \(parsed)"
-                )
-            }
-            materialIdentifier = parsed
         case "--service-name", "-sn":
             guard let value = iterator.next() else {
                 throw CLIError("\(arg) requires a value")
@@ -176,14 +156,12 @@ func parseArgs(_ arguments: [String]) throws -> ParseOutcome {
     }
 
     guard let keyFilePath else { throw CLIError("missing required <key-file-path>") }
-    guard let materialIdentifier else { throw CLIError("missing required --material-identifier|-mi") }
     guard let serviceName else { throw CLIError("missing required --service-name|-sn") }
     guard let dekBase64 else { throw CLIError("missing required --dek|-d") }
 
     return .run(
         Args(
             keyFilePath: keyFilePath,
-            materialIdentifier: materialIdentifier,
             serviceName: serviceName,
             dekBase64: dekBase64,
             force: force
@@ -196,13 +174,9 @@ struct CLIError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-// Enforces that the combined `<service-name>.<material-identifier>` string --
-// the exact value passed to hkdfguard_wrap_dek as `service` -- contains only
-// ASCII alphanumeric characters or '.', matching this project's Linux/Windows
-// tools. The material identifier is already digits-only (see its parse in
-// parseArgs), so in practice this only constrains --service-name, but it's
-// checked on the combined string to match exactly what gets passed to the
-// ABI call.
+// Enforces that --service-name -- the exact value passed to
+// hkdfguard_wrap_dek as `service` -- contains only ASCII alphanumeric
+// characters or '.', matching this project's Linux/Windows tools.
 func validateServiceCharset(_ service: String) throws {
     let isValid = service.utf8.allSatisfy { byte in
         (byte >= 0x30 && byte <= 0x39) // '0'-'9'
@@ -211,7 +185,7 @@ func validateServiceCharset(_ service: String) throws {
             || byte == 0x2E // '.'
     }
     guard isValid else {
-        throw CLIError("combined service name \"\(service)\" must contain only alphanumeric characters or '.'")
+        throw CLIError("service name \"\(service)\" must contain only alphanumeric characters or '.'")
     }
 }
 
@@ -448,14 +422,10 @@ func run(_ args: Args) throws {
         throw CLIError("\(args.keyFilePath) already exists; pass --force|-f to overwrite")
     }
 
-    // `service` is not secret -- it's a logical identifier, not key material
-    // -- so it lives for the rest of this function's scope, including the
-    // final status message below. Computed and validated before the DEK's
-    // own tightly-scoped block so that block can end the instant the DEK is
-    // no longer needed, without `service` needing to be reconstructed
-    // afterward.
-    let service = "\(args.serviceName).\(args.materialIdentifier)"
-    try validateServiceCharset(service)
+    // `args.serviceName` is not secret -- it's a logical identifier, not key
+    // material -- so no special scoping is needed for it. Validated before
+    // the DEK's own tightly-scoped block below.
+    try validateServiceCharset(args.serviceName)
 
     var args = args
     let wrapped: [UInt8]
@@ -495,7 +465,7 @@ func run(_ args: Args) throws {
             throw CLIError("--dek must decode to exactly \(dekLen) bytes, got \(dekData.count)")
         }
 
-        wrapped = try wrapDek(service: service, dek: dekData)
+        wrapped = try wrapDek(service: args.serviceName, dek: dekData)
         // the `defer` above zeroes `dekData` here, as this scope ends --
         // immediately after wrapDek returns the wrapped (encrypted, no
         // longer secret) form, which is the only thing that survives past
@@ -504,7 +474,7 @@ func run(_ args: Args) throws {
 
     try writeWrappedKeyFile(path: args.keyFilePath, bytes: wrapped, force: args.force)
 
-    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0640, service \"\(service)\")")
+    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0640, service \"\(args.serviceName)\")")
 }
 
 // MARK: - Entry point

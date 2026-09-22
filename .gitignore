@@ -9,6 +9,8 @@
 ## Package.swift, which links against it)
 build/
 dist/
+build-arm64/
+build-x64/
 
 ## User settings
 xcuserdata/
