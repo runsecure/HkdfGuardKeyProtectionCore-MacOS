@@ -95,7 +95,7 @@ struct HkdfGuardCommandLineToolTests {
         .deletingLastPathComponent() // repo root
 
     private static let dylibPath = repoRoot
-        .appendingPathComponent("build/Release/HkdfGuard.Kms.P256Sha512AesGcm256.dylib")
+        .appendingPathComponent("build/Release/HkdfGuard.Kms.MacOS.v1.dylib")
         .path
 
     private static let cliPackageDir = repoRoot
@@ -276,7 +276,7 @@ struct HkdfGuardCommandLineToolTests {
     }
 
     @Test func cliWrappedFileHasExpectedLengthAndPermissions() throws {
-        let service = "com.hkdfguard.tests.cli.file-attributes"
+        let service = "com.hkdfguard.tests.cli.file.attributes"
         defer { Self.deleteKEK(service: "\(service).1") }
 
         let keyFilePath = Self.makeTempFilePath()
@@ -304,7 +304,7 @@ struct HkdfGuardCommandLineToolTests {
         // is actually wired correctly end to end through the CLI's own
         // argument handling, not just asserted in a comment — application
         // code unwrapping under the wrong material identifier must fail.
-        let service = "com.hkdfguard.tests.cli.material-isolation"
+        let service = "com.hkdfguard.tests.cli.material.isolation"
         defer {
             Self.deleteKEK(service: "\(service).1")
             Self.deleteKEK(service: "\(service).2")
@@ -336,7 +336,7 @@ struct HkdfGuardCommandLineToolTests {
 
     @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
     func cliRefusesToOverwriteWithoutForce() throws {
-        let service = "com.hkdfguard.tests.cli.no-overwrite"
+        let service = "com.hkdfguard.tests.cli.no.overwrite"
         defer { Self.deleteKEK(service: "\(service).1") }
 
         let firstDek = Self.randomDEK()
@@ -368,7 +368,7 @@ struct HkdfGuardCommandLineToolTests {
 
     @Test(.enabled(if: interactiveKeychainAccessEnabled, interactiveKeychainAccessComment))
     func cliForceOverwritesWithNewDek() throws {
-        let service = "com.hkdfguard.tests.cli.force-overwrite"
+        let service = "com.hkdfguard.tests.cli.force.overwrite"
         defer { Self.deleteKEK(service: "\(service).1") }
 
         let keyFilePath = Self.makeTempFilePath()
@@ -407,7 +407,7 @@ struct HkdfGuardCommandLineToolTests {
         let result = try Self.runCLI([
             keyFilePath,
             "--material-identifier", "1",
-            "--service-name", "com.hkdfguard.tests.cli.bad-dek",
+            "--service-name", "com.hkdfguard.tests.cli.bad.dek",
             "--dek", "not-valid-base64!!"
         ])
         #expect(result.exitCode == 1)
@@ -421,7 +421,7 @@ struct HkdfGuardCommandLineToolTests {
         let result = try Self.runCLI([
             keyFilePath,
             "--material-identifier", "1",
-            "--service-name", "com.hkdfguard.tests.cli.short-dek",
+            "--service-name", "com.hkdfguard.tests.cli.short.dek",
             "--dek", Data([UInt8](repeating: 0, count: 16)).base64EncodedString()
         ])
         #expect(result.exitCode == 1)
@@ -429,7 +429,7 @@ struct HkdfGuardCommandLineToolTests {
     }
 
     @Test func cliRejectsMissingRequiredArguments() throws {
-        let result = try Self.runCLI(["--service-name", "com.hkdfguard.tests.cli.missing-args"])
+        let result = try Self.runCLI(["--service-name", "com.hkdfguard.tests.cli.missing.args"])
         #expect(result.exitCode == 2) // argument-parsing failure, distinct from a runtime failure
     }
 

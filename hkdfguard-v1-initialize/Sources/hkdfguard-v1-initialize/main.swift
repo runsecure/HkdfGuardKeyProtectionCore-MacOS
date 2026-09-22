@@ -196,22 +196,45 @@ struct CLIError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+// Enforces that the combined `<service-name>.<material-identifier>` string --
+// the exact value passed to hkdfguard_wrap_dek as `service` -- contains only
+// ASCII alphanumeric characters or '.', matching this project's Linux/Windows
+// tools. The material identifier is already digits-only (see its parse in
+// parseArgs), so in practice this only constrains --service-name, but it's
+// checked on the combined string to match exactly what gets passed to the
+// ABI call.
+func validateServiceCharset(_ service: String) throws {
+    let isValid = service.utf8.allSatisfy { byte in
+        (byte >= 0x30 && byte <= 0x39) // '0'-'9'
+            || (byte >= 0x41 && byte <= 0x5A) // 'A'-'Z'
+            || (byte >= 0x61 && byte <= 0x7A) // 'a'-'z'
+            || byte == 0x2E // '.'
+    }
+    guard isValid else {
+        throw CLIError("combined service name \"\(service)\" must contain only alphanumeric characters or '.'")
+    }
+}
+
 // MARK: - Wrap
 
 // Calls hkdfguard_wrap_dek, retrying once at the library-reported required
 // size if the initial buffer was too small -- same pattern as the Linux
-// tool's `wrap_dek`.
-func wrapDek(service: String, dek: [UInt8]) throws -> [UInt8] {
+// tool's `wrap_dek`. Takes `dek` as `Data` rather than `[UInt8]` so the
+// caller's already-tightly-scoped, zero-on-exit buffer (see `run` below) is
+// the only copy of the plaintext DEK that ever exists -- converting to
+// `[UInt8]` first would leave a second, unzeroed copy sitting in memory for
+// the rest of the process's life.
+func wrapDek(service: String, dek: Data) throws -> [UInt8] {
     var wrapped = [UInt8](repeating: 0, count: initialWrappedCapacity)
     var wrappedLen = Int32(wrapped.count)
 
     func callOnce() -> Int32 {
         service.withCString { servicePtr in
             wrapped.withUnsafeMutableBufferPointer { wrappedBuf in
-                dek.withUnsafeBufferPointer { dekBuf in
+                dek.withUnsafeBytes { dekBuf in
                     hkdfguard_wrap_dek(
                         servicePtr,
-                        dekBuf.baseAddress,
+                        dekBuf.bindMemory(to: UInt8.self).baseAddress,
                         Int32(dek.count),
                         wrappedBuf.baseAddress,
                         &wrappedLen
@@ -425,24 +448,59 @@ func run(_ args: Args) throws {
         throw CLIError("\(args.keyFilePath) already exists; pass --force|-f to overwrite")
     }
 
-    guard var dekData = Data(base64Encoded: args.dekBase64) else {
-        throw CLIError("--dek is not valid base64")
-    }
-    // Scrub our local copy of the decoded DEK bytes before this function
-    // returns, on every exit path -- matches the zeroing discipline used
-    // throughout the rest of this library (e.g. HkdfGuardAesGcm.swift).
-    defer {
-        _ = dekData.withUnsafeMutableBytes { raw in
-            raw.initializeMemory(as: UInt8.self, repeating: 0)
-        }
-    }
-
-    guard dekData.count == dekLen else {
-        throw CLIError("--dek must decode to exactly \(dekLen) bytes, got \(dekData.count)")
-    }
-
+    // `service` is not secret -- it's a logical identifier, not key material
+    // -- so it lives for the rest of this function's scope, including the
+    // final status message below. Computed and validated before the DEK's
+    // own tightly-scoped block so that block can end the instant the DEK is
+    // no longer needed, without `service` needing to be reconstructed
+    // afterward.
     let service = "\(args.serviceName).\(args.materialIdentifier)"
-    let wrapped = try wrapDek(service: service, dek: [UInt8](dekData))
+    try validateServiceCharset(service)
+
+    var args = args
+    let wrapped: [UInt8]
+    do {
+        guard var dekData = Data(base64Encoded: args.dekBase64) else {
+            throw CLIError("--dek is not valid base64")
+        }
+
+        // The base64 *text* has now served its only purpose: drop this
+        // process's one owned reference to it right here, rather than
+        // leaving it sitting in `args` for the rest of this function.
+        // Unlike the decoded DEK *bytes* below, Swift's String has no
+        // supported API for in-place zeroing (no mutable-buffer access to a
+        // String's storage) -- reassigning to an empty literal drops the
+        // only strong reference to the original buffer so it becomes
+        // eligible for deallocation at the earliest opportunity, which is
+        // the best this language allows, not a guaranteed wipe the way
+        // SecureZeroMemory/Zeroizing are on this project's Windows/Linux
+        // tools. This does not erase the original command-line argument the
+        // OS/process table still holds elsewhere -- see this file's header
+        // comment on that inherent, unavoidable argv-visibility limitation.
+        args.dekBase64 = ""
+
+        // Scrub our local copy of the decoded DEK bytes the instant this
+        // block ends, on every exit path -- immediately after wrapDek is
+        // done with it, not at the end of run() (which would otherwise
+        // leave it sitting in memory, unused but unwiped, through the
+        // potentially-slow 8-pass secure-overwrite and the final file
+        // write below).
+        defer {
+            _ = dekData.withUnsafeMutableBytes { raw in
+                raw.initializeMemory(as: UInt8.self, repeating: 0)
+            }
+        }
+
+        guard dekData.count == dekLen else {
+            throw CLIError("--dek must decode to exactly \(dekLen) bytes, got \(dekData.count)")
+        }
+
+        wrapped = try wrapDek(service: service, dek: dekData)
+        // the `defer` above zeroes `dekData` here, as this scope ends --
+        // immediately after wrapDek returns the wrapped (encrypted, no
+        // longer secret) form, which is the only thing that survives past
+        // this point.
+    }
 
     try writeWrappedKeyFile(path: args.keyFilePath, bytes: wrapped, force: args.force)
 

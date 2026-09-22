@@ -106,6 +106,24 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         return (status, Array(out.prefix(Int(max(outLen, 0)))), outLen)
     }
 
+    private static func generateAndWrap(
+        service: String,
+        bufferCapacity: Int32 = 1024
+    ) -> (status: Int32, wrapped: [UInt8], requiredLen: Int32) {
+        var out = [UInt8](repeating: 0, count: Int(bufferCapacity))
+        var outLen = bufferCapacity
+        let status = service.withCString { serviceCStr in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                hkdfguard_generate_and_wrap_dek(
+                    servicePtr: serviceCStr,
+                    outPtr: outBuf.baseAddress!,
+                    outLen: &outLen
+                )
+            }
+        }
+        return (status, Array(out.prefix(Int(max(outLen, 0)))), outLen)
+    }
+
     // MARK: - Round trip
 
     @Test func wrapThenUnwrapRecoversOriginalDEK() {
@@ -292,5 +310,54 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         let garbage = (0..<Self.wrappedLength).map { UInt8($0 & 0xFF) }
         let result = Self.unwrap(garbage, service: service)
         #expect(result.status != 0)
+    }
+
+    // MARK: - hkdfguard_generate_and_wrap_dek
+
+    @Test func generateAndWrapProducesAnUnwrappableDEK() {
+        let service = "com.hkdfguard.tests.generate-and-wrap.roundtrip"
+        defer { Self.deleteKEK(service: service) }
+
+        let result = Self.generateAndWrap(service: service)
+        #expect(result.status == 0)
+        #expect(result.wrapped.count == Self.wrappedLength)
+
+        let unwrapResult = Self.unwrap(result.wrapped, service: service)
+        #expect(unwrapResult.status == 0)
+        #expect(unwrapResult.plaintext.count == Self.dekLength)
+    }
+
+    @Test func twoGenerateAndWrapCallsProduceDifferentDEKs() {
+        // Each call sources its own fresh CSPRNG randomness for the DEK
+        // itself, not just a fresh nonce/ephemeral key - this is the check
+        // that actually distinguishes "generates a new DEK" from "wraps a
+        // fixed/reused buffer."
+        let service = "com.hkdfguard.tests.generate-and-wrap.uniqueness"
+        defer { Self.deleteKEK(service: service) }
+
+        let first = Self.generateAndWrap(service: service)
+        let second = Self.generateAndWrap(service: service)
+        #expect(first.status == 0)
+        #expect(second.status == 0)
+
+        let firstDEK = Self.unwrap(first.wrapped, service: service).plaintext
+        let secondDEK = Self.unwrap(second.wrapped, service: service).plaintext
+        #expect(firstDEK != secondDEK)
+    }
+
+    @Test func generateAndWrapRejectsEmptyServiceIdentifier() {
+        // No defer/cleanup needed: an empty service is rejected before any
+        // key provisioning or DEK generation happens.
+        let result = Self.generateAndWrap(service: "")
+        #expect(result.status == -8) // missingServiceIdentifier
+    }
+
+    @Test func generateAndWrapReportsRequiredCapacityWhenBufferTooSmall() {
+        let service = "com.hkdfguard.tests.generate-and-wrap.buffer-too-small"
+        defer { Self.deleteKEK(service: service) }
+
+        let result = Self.generateAndWrap(service: service, bufferCapacity: 10)
+        #expect(result.status == -2) // outputBufferTooSmall
+        #expect(result.requiredLen == Int32(Self.wrappedLength))
     }
 }

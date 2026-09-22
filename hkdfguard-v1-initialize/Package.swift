@@ -4,7 +4,7 @@ import PackageDescription
 
 // This package builds one executable, `hkdfguard-v1-initialize`, that links
 // directly against the sibling Xcode project's already-built
-// HkdfGuard.Kms.P256Sha512AesGcm256.dylib (the HkdfGuardKeyProtectionEnclaveDylib
+// HkdfGuard.Kms.MacOS.v1.dylib (the HkdfGuardKeyProtectionEnclaveDylib
 // target) and calls into it purely through its stable C ABI
 // (`hkdfguard_wrap_dek`) -- the same interface any other-language caller
 // uses, matching this project's Linux equivalent
@@ -17,7 +17,7 @@ import PackageDescription
 //   swift build --package-path <this-directory> -c release
 //   <this-directory>/.build/release/hkdfguard-v1-initialize --help
 //
-// The dylib's own `install_name` is `@rpath/HkdfGuard.Kms.P256Sha512AesGcm256.dylib`
+// The dylib's own `install_name` is `@rpath/HkdfGuard.Kms.MacOS.v1.dylib`
 // (see its build settings' DYLIB_INSTALL_NAME_BASE), so the executable needs
 // an explicit -rpath pointing at the directory it actually lives in to
 // resolve it at *run* time, not just link time. That directory is computed
@@ -34,7 +34,7 @@ let hkdfguardDylibDir = URL(fileURLWithPath: #filePath)
     .appendingPathComponent("../build/Release")
     .standardizedFileURL
     .path
-let hkdfguardDylibPath = "\(hkdfguardDylibDir)/HkdfGuard.Kms.P256Sha512AesGcm256.dylib"
+let hkdfguardDylibPath = "\(hkdfguardDylibDir)/HkdfGuard.Kms.MacOS.v1.dylib"
 
 let package = Package(
     name: "hkdfguard-v1-initialize",

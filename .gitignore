@@ -8,6 +8,7 @@
 ## directory used throughout this project's docs and by hkdfguard-v1-initialize's
 ## Package.swift, which links against it)
 build/
+dist/
 
 ## User settings
 xcuserdata/

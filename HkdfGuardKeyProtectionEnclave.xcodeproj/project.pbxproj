@@ -370,7 +370,7 @@
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				EXECUTABLE_PREFIX = "";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_NAME = "HkdfGuard.Kms.P256Sha512AesGcm256";
+				PRODUCT_NAME = "HkdfGuard.Kms.MacOS.v1";
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -533,7 +533,7 @@
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
 				EXECUTABLE_PREFIX = "";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_NAME = "HkdfGuard.Kms.P256Sha512AesGcm256";
+				PRODUCT_NAME = "HkdfGuard.Kms.MacOS.v1";
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";

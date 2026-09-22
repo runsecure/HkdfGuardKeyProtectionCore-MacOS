@@ -51,4 +51,18 @@ int32_t hkdfguard_unwrap_dek(
     int32_t* out_len
 );
 
+// Generates a fresh, cryptographically random 32-byte DEK and immediately
+// wraps it under the persistent Secure Enclave KEK identified by `service`,
+// in one call — for callers that want a brand new Ephemeral Data Protection
+// Key without having to source their own randomness. The newly generated
+// plaintext DEK never crosses this boundary: it is zeroed internally the
+// instant it has been wrapped, before this function returns. To recover it
+// later, unwrap the resulting payload via hkdfguard_unwrap_dek, passing the
+// same `service`.
+int32_t hkdfguard_generate_and_wrap_dek(
+    const char* service,
+    uint8_t* out,
+    int32_t* out_len
+);
+
 #endif

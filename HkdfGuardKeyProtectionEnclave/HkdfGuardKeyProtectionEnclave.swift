@@ -153,9 +153,13 @@ private func deriveWrappingKey(sharedSecret: SharedSecret, ephemeralPublicKeyRaw
 // `SecKeyCreateEncryptedData`/`CFData` based approach with CryptoKit's
 // native Secure Enclave key-agreement API.
 
-@_cdecl("hkdfguard_wrap_dek")
-public func hkdfguard_wrap_dek(
-    servicePtr: UnsafePointer<CChar>,
+/// The actual wrap orchestration shared by `hkdfguard_wrap_dek` (wraps a
+/// caller-supplied DEK) and `hkdfguard_generate_and_wrap_dek` (wraps a
+/// freshly generated one) — factored out here so this crypto sequence
+/// exists in exactly one place rather than being duplicated between the two
+/// `@_cdecl` entry points below.
+private func wrapDekCore(
+    service: String,
     dekPtr: UnsafePointer<UInt8>,
     dekLen: Int32,
     outPtr: UnsafeMutablePointer<UInt8>,
@@ -164,8 +168,6 @@ public func hkdfguard_wrap_dek(
     guard dekLen == Int32(hkdfguardDekLength) else {
         return HKDFGuardStatus.invalidInputLength.rawValue
     }
-
-    let service = String(cString: servicePtr)
     guard !service.isEmpty else {
         return HKDFGuardStatus.missingServiceIdentifier.rawValue
     }
@@ -237,6 +239,71 @@ public func hkdfguard_wrap_dek(
     outLen.pointee = Int32(totalLen)
 
     return HKDFGuardStatus.success.rawValue
+}
+
+@_cdecl("hkdfguard_wrap_dek")
+public func hkdfguard_wrap_dek(
+    servicePtr: UnsafePointer<CChar>,
+    dekPtr: UnsafePointer<UInt8>,
+    dekLen: Int32,
+    outPtr: UnsafeMutablePointer<UInt8>,
+    outLen: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    let service = String(cString: servicePtr)
+    return wrapDekCore(service: service, dekPtr: dekPtr, dekLen: dekLen, outPtr: outPtr, outLen: outLen)
+}
+
+// MARK: - Generate a new random DEK and wrap it, in one call
+
+/// Fills a fresh `hkdfguardDekLength`-byte buffer with cryptographically
+/// random data via the system CSPRNG — the same `SecRandomCopyBytes` API
+/// this project's own CLI tool (`hkdfguard-v1-initialize`) uses for its
+/// secure-overwrite passes, and the macOS analog of Windows'
+/// `BCryptGenRandom` / Linux's `OsRng` used for the equivalent purpose
+/// elsewhere in this project. Returns `nil` (rather than throwing/trapping)
+/// on the vanishingly rare case `SecRandomCopyBytes` itself fails, so the
+/// caller can map that to an ordinary `HKDFGuardStatus` error code like any
+/// other failure.
+private func generateRandomDek() -> Data? {
+    var bytes = Data(count: hkdfguardDekLength)
+    let status = bytes.withUnsafeMutableBytes { raw in
+        SecRandomCopyBytes(kSecRandomDefault, hkdfguardDekLength, raw.baseAddress!)
+    }
+    guard status == errSecSuccess else { return nil }
+    return bytes
+}
+
+@_cdecl("hkdfguard_generate_and_wrap_dek")
+public func hkdfguard_generate_and_wrap_dek(
+    servicePtr: UnsafePointer<CChar>,
+    outPtr: UnsafeMutablePointer<UInt8>,
+    outLen: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    let service = String(cString: servicePtr)
+
+    guard var dek = generateRandomDek() else {
+        return HKDFGuardStatus.encryptionFailed.rawValue
+    }
+    // Scrub our local copy of the freshly generated DEK the instant this
+    // function returns, on every exit path — it never crosses back out to
+    // the caller (see this project's public header's doc comment on this
+    // function): only the wrapped, no-longer-secret payload survives past
+    // this point.
+    defer {
+        _ = dek.withUnsafeMutableBytes { raw in
+            raw.initializeMemory(as: UInt8.self, repeating: 0)
+        }
+    }
+
+    return dek.withUnsafeBytes { raw -> Int32 in
+        wrapDekCore(
+            service: service,
+            dekPtr: raw.bindMemory(to: UInt8.self).baseAddress!,
+            dekLen: Int32(dek.count),
+            outPtr: outPtr,
+            outLen: outLen
+        )
+    }
 }
 
 // MARK: - Unwrap (decrypt) a DEK using the Secure Enclave KEK
