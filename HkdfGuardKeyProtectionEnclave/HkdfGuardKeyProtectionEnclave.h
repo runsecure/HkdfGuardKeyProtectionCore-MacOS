@@ -30,6 +30,13 @@ FOUNDATION_EXPORT const unsigned char HkdfGuardKeyProtectionEnclaveVersionString
 //   -6  decryptionFailed       (also returned for a wrong/mismatched service)
 //   -7  unexpectedOutputLength
 //   -8  missingServiceIdentifier (service was NULL or an empty string)
+//   -9  enclaveUnavailable (Secure Enclave is not available on this machine)
+
+// Ensures the Kek exists and generates a new kek for the input service name
+// if it does not.  This is a one time call to be tracked by the running
+// application.
+HKDFGUARD_API int32_t hkdfguard_ensure_kek(
+    const char* service);
 
 // `service` must be a non-empty, null-terminated UTF-8 string identifying
 // the calling application. Each distinct service string gets its own,
@@ -54,11 +61,7 @@ int32_t hkdfguard_unwrap_dek(
 // Generates a fresh, cryptographically random 32-byte DEK and immediately
 // wraps it under the persistent Secure Enclave KEK identified by `service`,
 // in one call — for callers that want a brand new Ephemeral Data Protection
-// Key without having to source their own randomness. The newly generated
-// plaintext DEK never crosses this boundary: it is zeroed internally the
-// instant it has been wrapped, before this function returns. To recover it
-// later, unwrap the resulting payload via hkdfguard_unwrap_dek, passing the
-// same `service`.
+// Key without having to source their own randomness.
 int32_t hkdfguard_generate_and_wrap_dek(
     const char* service,
     uint8_t* out,
