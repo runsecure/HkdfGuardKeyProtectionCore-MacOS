@@ -143,6 +143,27 @@ struct HkdfGuardCommandLineToolTests {
         if let currentDirectory {
             process.currentDirectoryURL = currentDirectory
         }
+
+        // Process() inherits the parent's environment by default — here,
+        // the xctest host's. Xcode points that host's DYLD_LIBRARY_PATH/
+        // DYLD_FRAMEWORK_PATH at its own DerivedData Products directory so
+        // the test bundle can find HkdfGuardKeyProtectionEnclave.framework;
+        // dyld's DYLD_LIBRARY_PATH override resolves @rpath/<leaf-name>
+        // against *any* matching filename found there first, ahead of a
+        // launched executable's own embedded rpath. Confirmed directly: a
+        // stale, same-named dylib left behind in that DerivedData directory
+        // from an earlier build caused the CLI subprocess launched below to
+        // silently load that wrong, outdated dylib instead of the current
+        // one at build/Release — producing a pre-fingerprint 124-byte
+        // wrapped payload instead of 156, and in other runs, behavior odd
+        // enough to hang. Stripping DYLD_* here removes that whole class of
+        // environment leakage regardless of what DerivedData happens to
+        // contain.
+        var environment = ProcessInfo.processInfo.environment
+        for key in environment.keys where key.hasPrefix("DYLD_") {
+            environment.removeValue(forKey: key)
+        }
+        process.environment = environment
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
@@ -310,7 +331,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(permissions == 0o640)
 
         let wrapped = try Data(contentsOf: URL(fileURLWithPath: keyFilePath))
-        #expect(wrapped.count == 124) // 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
+        #expect(wrapped.count == 156) // 32-byte KEK fingerprint + 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
     }
 
     // MARK: - File handling: refuses to clobber, --force overwrites correctly

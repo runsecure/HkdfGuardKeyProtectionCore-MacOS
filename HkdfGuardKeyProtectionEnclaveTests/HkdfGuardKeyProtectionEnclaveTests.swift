@@ -10,15 +10,30 @@ import Security
 @testable import HkdfGuardKeyProtectionEnclave
 
 /// Exercises the public C-ABI entry points exposed by
-/// `HkdfGuardKeyProtectionEnclave.h` — `hkdfguard_wrap_dek` and
-/// `hkdfguard_unwrap_dek`. Both are `@_cdecl` functions, but they're still
-/// ordinary `public` Swift functions underneath, so they can be called
-/// directly here without any C interop.
+/// `HkdfGuardKeyProtectionEnclave.h` — `hkdfguard_kek_exists`,
+/// `hkdfguard_create_kek`, `hkdfguard_wrap_dek`, `hkdfguard_unwrap_dek`, and
+/// `hkdfguard_generate_and_wrap_dek`. All are `@_cdecl` functions, but
+/// they're still ordinary `public` Swift functions underneath, so they can
+/// be called directly here without any C interop.
 ///
 /// These status codes are the module's private `HKDFGuardStatus` raw
 /// values, mirrored here since that enum isn't visible outside the module:
 ///   0 = success, -1 = invalidInputLength, -2 = outputBufferTooSmall,
-///   -3 = keyUnavailable, -6 = decryptionFailed, -8 = missingServiceIdentifier.
+///   -3 = keyUnavailable (reserved, no longer returned), -6 = decryptionFailed,
+///   -8 = invalidServiceIdentifier, -9 = enclaveUnavailable,
+///   -10 = kekNotFound, -11 = kekCorrupted, -12 = accessControlCreationFailed,
+///   -13 = keyGenerationFailed, -14 = keychainWriteFailed,
+///   -15 = kekVerificationFailed, -16 = fingerprintMismatch.
+///
+/// Important behavior change worth calling out here, not just in the
+/// individual tests below: `hkdfguard_wrap_dek`/`hkdfguard_unwrap_dek`/
+/// `hkdfguard_generate_and_wrap_dek` no longer create a KEK on first use —
+/// that's the entire point of splitting `hkdfguard_kek_exists`/
+/// `hkdfguard_create_kek` out as their own calls (see
+/// HkdfGuardKeyProtectionEnclave.swift's `createKEK`/`kekExists`). Every
+/// test below that expects a wrap/unwrap/generate-and-wrap to actually
+/// *succeed* therefore calls `Self.createKEK(service:)` first and asserts
+/// it returns success, exactly as real calling code now must.
 ///
 /// This suite runs serialized (`.serialized` below), not in parallel:
 /// Swift Testing's default per-test parallelism was observed to hang the
@@ -35,6 +50,16 @@ import Security
 /// immediately after declaring the service string it'll use — `defer`
 /// runs on every exit path, including a failed `#expect`, so a failing
 /// test still leaves the keychain clean.
+///
+/// Service name charset: `hkdfguard_kek_exists`/`hkdfguard_create_kek`/
+/// `hkdfguard_wrap_dek`/`hkdfguard_unwrap_dek`/
+/// `hkdfguard_generate_and_wrap_dek` all validate `service` via
+/// `validServiceName` — ASCII letters, digits, and `.` only, 1-128
+/// characters — so every service literal below deliberately uses `.` in
+/// place of the `-`/`_` this suite's names might otherwise read more
+/// naturally with (e.g. `wrapped.length`, not `wrapped-length`), and
+/// nowhere relies on `UUID().uuidString` verbatim (its dashes would fail
+/// validation too).
 @Suite(
     .serialized,
     .enabled(
@@ -47,7 +72,8 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     // MARK: - Helpers
 
     private static let dekLength = 32
-    private static let wrappedLength = 124 // 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
+    private static let wrappedLength = 156 // 32-byte KEK fingerprint + 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag
+    private static let maxServiceNameLength = 128
 
     private static func randomDEK() -> [UInt8] {
         (0..<dekLength).map { _ in UInt8.random(in: .min ... .max) }
@@ -65,6 +91,21 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
             kSecAttrAccount as String: hkdfguardKeychainAccount
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    private static func kekExists(service: String) -> (status: Int32, exists: Bool) {
+        var outExists: Int32 = -1
+        let status = service.withCString { serviceCStr in
+            hkdfguard_kek_exists(servicePtr: serviceCStr, outExists: &outExists)
+        }
+        return (status, outExists != 0)
+    }
+
+    @discardableResult
+    private static func createKEK(service: String) -> Int32 {
+        service.withCString { serviceCStr in
+            hkdfguard_create_kek(servicePtr: serviceCStr)
+        }
     }
 
     private static func wrap(
@@ -131,11 +172,172 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         return (status, Array(out.prefix(Int(max(outLen, 0)))), outLen)
     }
 
+    // MARK: - hkdfguard_kek_exists / hkdfguard_create_kek
+
+    @Test func kekExistsReportsFalseForNeverCreatedService() {
+        let service = "com.hkdfguard.tests.kek.exists.never.created"
+        // No defer/cleanup needed: this service is never created by this
+        // test, only queried.
+        let result = Self.kekExists(service: service)
+        #expect(result.status == 0)
+        #expect(result.exists == false)
+    }
+
+    @Test func createKekThenKekExistsReportsTrue() {
+        let service = "com.hkdfguard.tests.kek.exists.after.create"
+        defer { Self.deleteKEK(service: service) }
+
+        #expect(Self.createKEK(service: service) == 0)
+
+        let result = Self.kekExists(service: service)
+        #expect(result.status == 0)
+        #expect(result.exists == true)
+    }
+
+    @Test func createKekIsIdempotent() {
+        // Calling create twice must succeed both times, not treat the
+        // second call as an error just because a key already exists —
+        // that's the whole point of it being "create if missing," not
+        // "create or fail."
+        let service = "com.hkdfguard.tests.kek.create.idempotent"
+        defer { Self.deleteKEK(service: service) }
+
+        #expect(Self.createKEK(service: service) == 0)
+        #expect(Self.createKEK(service: service) == 0)
+
+        let result = Self.kekExists(service: service)
+        #expect(result.status == 0)
+        #expect(result.exists == true)
+    }
+
+    @Test func concurrentFirstUseOfCreateKekConvergesOnOneKEK() {
+        // Regression test: createKEK() used to report keyUnavailable (-3)
+        // non-deterministically when multiple callers raced to create the
+        // very first keychain item for a service at the same time
+        // (SecItemAdd's unique index on service+account lets only one
+        // caller's create win; the rest must fall back to loading the
+        // winner's key rather than treating that as failure). This race
+        // used to be exercised through hkdfguard_wrap_dek itself, back
+        // when wrap implicitly created a missing KEK — now that creation
+        // is its own call, this exercises hkdfguard_create_kek directly,
+        // which is where that logic actually lives today. Using a
+        // never-before-seen service identifier here forces every task
+        // through that first-use race on every run.
+        //
+        // This deliberately uses DispatchQueue.concurrentPerform (real OS
+        // threads from GCD's pool) rather than Swift's async/withTaskGroup:
+        // hkdfguard_create_kek makes synchronous, blocking
+        // Security-framework calls, and Swift Concurrency's cooperative
+        // thread pool has a limited number of threads that assume tasks
+        // suspend via `await` rather than block outright. Spawning several
+        // blocking calls via withTaskGroup here — on top of Swift
+        // Testing's own default per-test parallelism — was enough to
+        // exhaust that pool and deadlock the entire test run, observed
+        // directly (every thread parked in the Testing runner's
+        // scheduler, no forward progress). GCD's pool is designed for
+        // exactly this kind of blocking work.
+        //
+        // Service names must stay within the letters/digits/'.' charset —
+        // unlike the old version of this test, this can't suffix a raw
+        // UUID (its dashes would be rejected), so it strips them instead.
+        let service = "com.hkdfguard.tests.kek.create.concurrent.\(UUID().uuidString.filter { $0 != "-" })"
+        defer { Self.deleteKEK(service: service) }
+
+        let lock = NSLock()
+        var statuses: [Int32] = []
+
+        // 3 concurrent creators is enough to exercise the unique-index
+        // race (needs >=2); observed directly that pushing much more
+        // simultaneous load at the real Secure Enclave/securityd IPC
+        // layer causes severe contention on this hardware, so this stays
+        // deliberately modest rather than maximizing concurrency.
+        DispatchQueue.concurrentPerform(iterations: 3) { _ in
+            let status = Self.createKEK(service: service)
+            lock.lock()
+            statuses.append(status)
+            lock.unlock()
+        }
+
+        #expect(statuses.count == 3)
+        #expect(statuses.allSatisfy { $0 == 0 })
+    }
+
+    @Test func kekExistsRejectsInvalidServiceIdentifier() {
+        // No defer/cleanup needed: rejected before any key provisioning
+        // or lookup happens.
+        let result = Self.kekExists(service: "")
+        #expect(result.status == -8) // invalidServiceIdentifier
+        #expect(result.exists == false)
+    }
+
+    @Test func createKekRejectsInvalidServiceIdentifier() {
+        // No defer/cleanup needed: rejected before any key provisioning
+        // happens.
+        #expect(Self.createKEK(service: "") == -8) // invalidServiceIdentifier
+    }
+
+    @Test func createKekAcceptsServiceNameAtMaxLength() {
+        let service = String(repeating: "a", count: Self.maxServiceNameLength)
+        defer { Self.deleteKEK(service: service) }
+
+        #expect(Self.createKEK(service: service) == 0)
+        #expect(Self.kekExists(service: service).exists == true)
+    }
+
+    @Test func createKekRejectsServiceNameOverMaxLength() {
+        // No defer/cleanup needed: rejected before any key provisioning
+        // happens.
+        let tooLong = String(repeating: "a", count: Self.maxServiceNameLength + 1)
+        #expect(Self.createKEK(service: tooLong) == -8) // invalidServiceIdentifier
+
+        let result = Self.kekExists(service: tooLong)
+        #expect(result.status == -8) // invalidServiceIdentifier
+        #expect(result.exists == false)
+    }
+
+    @Test func createKekRejectsServiceNameWithDisallowedCharacters() {
+        // No defer/cleanup needed: rejected before any key provisioning
+        // happens. Only ASCII letters, digits, and '.' are accepted — a
+        // hyphen (still a very ordinary character in a reverse-DNS-style
+        // identifier) must not slip through.
+        #expect(Self.createKEK(service: "com.hkdfguard.tests-invalid-charset") == -8) // invalidServiceIdentifier
+    }
+
+    // MARK: - wrap/unwrap require an already-created KEK
+
+    @Test func wrapFailsWithKekNotFoundWhenNoKekWasCreated() {
+        // The core behavior change this split is all about: wrap no
+        // longer creates a KEK on first use. A well-formed, never-created
+        // service must fail with kekNotFound, not succeed by silently
+        // provisioning one.
+        let service = "com.hkdfguard.tests.wrap.without.create"
+        // No defer/cleanup needed: hkdfguard_wrap_dek must not create
+        // anything here — that's exactly what's under test.
+        let result = Self.wrap(Self.randomDEK(), service: service)
+        #expect(result.status == -10) // kekNotFound
+    }
+
+    @Test func unwrapFailsWithKekNotFoundWhenNoKekWasCreated() {
+        let service = "com.hkdfguard.tests.unwrap.without.create"
+        // No defer/cleanup needed: hkdfguard_unwrap_dek must not create
+        // anything here either.
+        //
+        // The KEK lookup now happens before the fingerprint/ephemeral-key/
+        // SealedBox are even parsed, so content doesn't matter here —
+        // only that the blob is longer than the fixed 96-byte
+        // fingerprint+ephemeral-key prefix, matching any real wrapped
+        // payload's minimum shape.
+        let arbitraryBlob = [UInt8](repeating: 0, count: Self.wrappedLength)
+        let result = Self.unwrap(arbitraryBlob, service: service)
+        #expect(result.status == -10) // kekNotFound
+    }
+
     // MARK: - Round trip
 
     @Test func wrapThenUnwrapRecoversOriginalDEK() {
         let service = "com.hkdfguard.tests.roundtrip"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
         let dek = Self.randomDEK()
 
         let wrapResult = Self.wrap(dek, service: service)
@@ -147,8 +349,9 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     }
 
     @Test func wrappedOutputHasExpectedLength() {
-        let service = "com.hkdfguard.tests.wrapped-length"
+        let service = "com.hkdfguard.tests.wrapped.length"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let result = Self.wrap(Self.randomDEK(), service: service)
         #expect(result.status == 0)
@@ -160,8 +363,9 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // wrapping the same DEK twice must never produce identical output —
         // this is what makes the scheme semantically secure rather than
         // just "encrypted."
-        let service = "com.hkdfguard.tests.nonce-uniqueness"
+        let service = "com.hkdfguard.tests.nonce.uniqueness"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
         let dek = Self.randomDEK()
         let first = Self.wrap(dek, service: service)
         let second = Self.wrap(dek, service: service)
@@ -184,6 +388,8 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
             Self.deleteKEK(service: serviceA)
             Self.deleteKEK(service: serviceB)
         }
+        #expect(Self.createKEK(service: serviceA) == 0)
+        #expect(Self.createKEK(service: serviceB) == 0)
 
         let dek = Self.randomDEK()
         let wrapResult = Self.wrap(dek, service: serviceA)
@@ -197,69 +403,28 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // No defer/cleanup needed: an empty service is rejected before any
         // key provisioning happens, so nothing is ever created.
         let result = Self.wrap(Self.randomDEK(), service: "")
-        #expect(result.status == -8) // missingServiceIdentifier
+        #expect(result.status == -8) // invalidServiceIdentifier
     }
 
     @Test func unwrapRejectsEmptyServiceIdentifier() {
-        let setupService = "com.hkdfguard.tests.empty-service-unwrap-setup"
+        let setupService = "com.hkdfguard.tests.empty.service.unwrap.setup"
         defer { Self.deleteKEK(service: setupService) }
+        #expect(Self.createKEK(service: setupService) == 0)
 
         let wrapped = Self.wrap(Self.randomDEK(), service: setupService).wrapped
         let result = Self.unwrap(wrapped, service: "")
-        #expect(result.status == -8) // missingServiceIdentifier
-    }
-
-    @Test func concurrentFirstUseOfSameServiceConvergesOnOneKEK() {
-        // Regression test: getOrCreateKEK() used to report keyUnavailable
-        // (-3) non-deterministically when multiple callers raced to
-        // create the very first keychain item for a service at the same
-        // time (SecItemAdd's unique index on service+account lets only
-        // one caller's create win; the rest must fall back to loading the
-        // winner's key rather than treating that as failure). Using a
-        // never-before-seen service identifier here forces every task
-        // through that first-use race on every run.
-        //
-        // This deliberately uses DispatchQueue.concurrentPerform (real OS
-        // threads from GCD's pool) rather than Swift's async/withTaskGroup:
-        // hkdfguard_wrap_dek makes synchronous, blocking Security-framework
-        // calls, and Swift Concurrency's cooperative thread pool has a
-        // limited number of threads that assume tasks suspend via `await`
-        // rather than block outright. Spawning several blocking calls via
-        // withTaskGroup here — on top of Swift Testing's own default
-        // per-test parallelism — was enough to exhaust that pool and
-        // deadlock the entire test run, observed directly (every thread
-        // parked in the Testing runner's scheduler, no forward progress).
-        // GCD's pool is designed for exactly this kind of blocking work.
-        let service = "com.hkdfguard.tests.concurrent-first-use.\(UUID().uuidString)"
-        defer { Self.deleteKEK(service: service) }
-        let dek = Self.randomDEK()
-
-        let lock = NSLock()
-        var statuses: [Int32] = []
-
-        // 3 concurrent creators is enough to exercise the unique-index
-        // race (needs >=2); observed directly that pushing much more
-        // simultaneous load at the real Secure Enclave/securityd IPC
-        // layer causes severe contention on this hardware, so this stays
-        // deliberately modest rather than maximizing concurrency.
-        DispatchQueue.concurrentPerform(iterations: 3) { _ in
-            let status = Self.wrap(dek, service: service).status
-            lock.lock()
-            statuses.append(status)
-            lock.unlock()
-        }
-
-        #expect(statuses.count == 3)
-        #expect(statuses.allSatisfy { $0 == 0 })
+        #expect(result.status == -8) // invalidServiceIdentifier
     }
 
     // MARK: - Input validation
 
     @Test func wrapRejectsIncorrectDEKLength() {
         // No defer/cleanup needed: the DEK-length check runs before any
-        // key provisioning, so nothing is ever created.
+        // key provisioning (wrapDekCore checks it before ever calling
+        // getKEK), so nothing is ever created even without a prior
+        // hkdfguard_create_kek call here.
         let tooShort = [UInt8](repeating: 0, count: 16)
-        let result = Self.wrap(tooShort, service: "com.hkdfguard.tests.bad-dek-length")
+        let result = Self.wrap(tooShort, service: "com.hkdfguard.tests.bad.dek.length")
         #expect(result.status == -1) // invalidInputLength
     }
 
@@ -267,15 +432,16 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // No defer/cleanup needed: the length check runs before any key
         // provisioning, so nothing is ever created.
         let tooShort = [UInt8](repeating: 0, count: 32)
-        let result = Self.unwrap(tooShort, service: "com.hkdfguard.tests.short-blob")
+        let result = Self.unwrap(tooShort, service: "com.hkdfguard.tests.short.blob")
         #expect(result.status == -1) // invalidInputLength
     }
 
     // MARK: - Output buffer sizing
 
     @Test func wrapReportsRequiredCapacityWhenBufferTooSmall() {
-        let service = "com.hkdfguard.tests.wrap-buffer-too-small"
+        let service = "com.hkdfguard.tests.wrap.buffer.too.small"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let result = Self.wrap(Self.randomDEK(), service: service, bufferCapacity: 10)
         #expect(result.status == -2) // outputBufferTooSmall
@@ -283,8 +449,9 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     }
 
     @Test func unwrapReportsRequiredCapacityWhenBufferTooSmall() {
-        let service = "com.hkdfguard.tests.unwrap-buffer-too-small"
+        let service = "com.hkdfguard.tests.unwrap.buffer.too.small"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let wrapped = Self.wrap(Self.randomDEK(), service: service).wrapped
         let result = Self.unwrap(wrapped, service: service, bufferCapacity: 4)
@@ -295,23 +462,45 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     // MARK: - Tamper detection
 
     @Test func unwrapRejectsTamperedCiphertext() {
-        let service = "com.hkdfguard.tests.tamper-detection"
+        let service = "com.hkdfguard.tests.tamper.detection"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         var wrapped = Self.wrap(Self.randomDEK(), service: service).wrapped
         // Flip a bit inside the AES-GCM ciphertext/tag region (well past
-        // the 64-byte ephemeral public key prefix).
+        // the fingerprint + ephemeral-public-key prefix), leaving the
+        // fingerprint itself untouched so this exercises the AES-GCM tag
+        // check specifically, not the fingerprint check.
         wrapped[wrapped.count - 1] ^= 0xFF
 
         let result = Self.unwrap(wrapped, service: service)
         #expect(result.status == -6) // decryptionFailed — the GCM tag check must catch this
     }
 
+    @Test func unwrapRejectsTamperedFingerprint() {
+        // Distinct from tamper detection on the ciphertext above: flipping
+        // a bit inside the fingerprint itself (the payload's leading 32
+        // bytes) must be caught by the fingerprint comparison specifically
+        // — before AES-GCM is even attempted — and report
+        // fingerprintMismatch, not decryptionFailed.
+        let service = "com.hkdfguard.tests.tamper.fingerprint"
+        defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
+
+        var wrapped = Self.wrap(Self.randomDEK(), service: service).wrapped
+        wrapped[0] ^= 0xFF
+
+        let result = Self.unwrap(wrapped, service: service)
+        #expect(result.status == -16) // fingerprintMismatch
+    }
+
     @Test func unwrapRejectsGarbageInput() {
         // Unlike the length-check-only validation tests above, this blob
-        // is a full 124 bytes, so it passes the length/service checks and
-        // does reach key provisioning before failing to parse/decrypt.
-        let service = "com.hkdfguard.tests.garbage-input"
+        // is a full wrappedLength bytes, so it passes the length/service
+        // checks. No KEK is created for this service, so this is expected
+        // to fail with kekNotFound rather than reach the fingerprint check
+        // or decryption — either way, it must not succeed.
+        let service = "com.hkdfguard.tests.garbage.input"
         defer { Self.deleteKEK(service: service) }
 
         let garbage = (0..<Self.wrappedLength).map { UInt8($0 & 0xFF) }
@@ -322,8 +511,9 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     // MARK: - hkdfguard_generate_and_wrap_dek
 
     @Test func generateAndWrapProducesAnUnwrappableDEK() {
-        let service = "com.hkdfguard.tests.generate-and-wrap.roundtrip"
+        let service = "com.hkdfguard.tests.generate.and.wrap.roundtrip"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let result = Self.generateAndWrap(service: service)
         #expect(result.status == 0)
@@ -339,8 +529,9 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // itself, not just a fresh nonce/ephemeral key - this is the check
         // that actually distinguishes "generates a new DEK" from "wraps a
         // fixed/reused buffer."
-        let service = "com.hkdfguard.tests.generate-and-wrap.uniqueness"
+        let service = "com.hkdfguard.tests.generate.and.wrap.uniqueness"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let first = Self.generateAndWrap(service: service)
         let second = Self.generateAndWrap(service: service)
@@ -356,12 +547,13 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // No defer/cleanup needed: an empty service is rejected before any
         // key provisioning or DEK generation happens.
         let result = Self.generateAndWrap(service: "")
-        #expect(result.status == -8) // missingServiceIdentifier
+        #expect(result.status == -8) // invalidServiceIdentifier
     }
 
     @Test func generateAndWrapReportsRequiredCapacityWhenBufferTooSmall() {
-        let service = "com.hkdfguard.tests.generate-and-wrap.buffer-too-small"
+        let service = "com.hkdfguard.tests.generate.and.wrap.buffer.too.small"
         defer { Self.deleteKEK(service: service) }
+        #expect(Self.createKEK(service: service) == 0)
 
         let result = Self.generateAndWrap(service: service, bufferCapacity: 10)
         #expect(result.status == -2) // outputBufferTooSmall

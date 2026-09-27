@@ -1,11 +1,13 @@
-// CLI tool: wraps a caller-supplied Data Encryption Key (DEK) under a
-// persistent KEK and writes the wrapped payload to a file.
+// CLI tool: ensures a persistent KEK exists for the given service, then
+// wraps a caller-supplied Data Encryption Key (DEK) under it and writes
+// the wrapped payload to a file.
 //
 // Calls into the HkdfGuard library through its stable C ABI
-// (`hkdfguard_wrap_dek`), the same interface any other-language caller
-// uses -- this tool takes no shortcut through the library's internal Swift
-// types (it doesn't even `import` the library's own Swift module; see
-// Package.swift). Mirrors this project's Linux equivalent
+// (`hkdfguard_create_kek`, then `hkdfguard_wrap_dek`), the same interface
+// any other-language caller uses -- this tool takes no shortcut through
+// the library's internal Swift types (it doesn't even `import` the
+// library's own Swift module; see Package.swift). Mirrors this project's
+// Linux equivalent
 // (HkdfGuardKeyProtectionCore-Linux/src/bin/hkdfguard-v1-initialize.rs)
 // argument-for-argument; see writeWrappedKeyFile below for one behavior
 // difference (POSIX 0640 permissions on the output file), specific to this
@@ -53,6 +55,12 @@ func hkdfguard_wrap_dek(
     _ outLen: UnsafeMutablePointer<Int32>?
 ) -> Int32
 
+// `hkdfguard_wrap_dek` no longer creates a KEK on first use -- that's now
+// this tool's own responsibility, one call earlier (see `run` below),
+// exactly the same as any other caller of the library.
+@_silgen_name("hkdfguard_create_kek")
+func hkdfguard_create_kek(_ service: UnsafePointer<CChar>?) -> Int32
+
 // Mirrors HKDFGuardStatus in HkdfGuardKeyProtectionEnclave.swift -- kept as
 // a separate, parallel definition rather than importing that module, for
 // the same "go through the C ABI only" reason as the `@_silgen_name`
@@ -62,12 +70,20 @@ enum HKDFGuardStatus: Int32 {
     case success = 0
     case invalidInputLength = -1
     case outputBufferTooSmall = -2
-    case keyUnavailable = -3
+    case keyUnavailable = -3 // reserved; no longer returned by the library -- see -10 and lower
     case publicKeyUnavailable = -4
     case encryptionFailed = -5
     case decryptionFailed = -6
     case unexpectedOutputLength = -7
-    case missingServiceIdentifier = -8
+    case invalidServiceIdentifier = -8
+    case enclaveUnavailable = -9
+    case kekNotFound = -10
+    case kekCorrupted = -11
+    case accessControlCreationFailed = -12
+    case keyGenerationFailed = -13
+    case keychainWriteFailed = -14
+    case kekVerificationFailed = -15
+    case fingerprintMismatch = -16
 
     var description: String {
         switch self {
@@ -79,7 +95,15 @@ enum HKDFGuardStatus: Int32 {
         case .encryptionFailed: return "a cryptographic operation failed"
         case .decryptionFailed: return "decryption failed"
         case .unexpectedOutputLength: return "the library produced an unexpected output length"
-        case .missingServiceIdentifier: return "the service name is missing or empty"
+        case .invalidServiceIdentifier: return "the service name is missing, empty, longer than 128 characters, or contains a character other than an ASCII letter, digit, or '.'"
+        case .enclaveUnavailable: return "the Secure Enclave is not available on this machine"
+        case .kekNotFound: return "no key exists yet for this service -- call hkdfguard_create_kek first"
+        case .kekCorrupted: return "a keychain item exists for this service but could not be reconstructed into a usable key"
+        case .accessControlCreationFailed: return "failed to set up access control for a new key"
+        case .keyGenerationFailed: return "the Secure Enclave refused to generate a new key"
+        case .keychainWriteFailed: return "failed to persist the newly generated key to the keychain"
+        case .kekVerificationFailed: return "the newly created key could not be verified after being stored"
+        case .fingerprintMismatch: return "the wrapped payload's embedded KEK fingerprint does not match the current key"
         }
     }
 }
@@ -174,10 +198,21 @@ struct CLIError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-// Enforces that --service-name -- the exact value passed to
-// hkdfguard_wrap_dek as `service` -- contains only ASCII alphanumeric
-// characters or '.', matching this project's Linux/Windows tools.
+// Maximum length, in bytes, the library accepts for a service name (see
+// `validServiceName` in HkdfGuardKeyProtectionEnclave.swift). Checked here
+// too so an over-length name fails fast with a clear message instead of
+// making a wasted round trip through hkdfguard_create_kek/hkdfguard_wrap_dek
+// just to get the same rejection back as an opaque status code.
+let maxServiceNameLength = 128
+
+// Enforces the exact same rule the library itself applies to `service` (see
+// `validServiceName` in HkdfGuardKeyProtectionEnclave.swift): 1-128 ASCII
+// alphanumeric characters or '.', matching this project's Linux/Windows
+// tools.
 func validateServiceCharset(_ service: String) throws {
+    guard service.utf8.count <= maxServiceNameLength else {
+        throw CLIError("service name \"\(service)\" must be at most \(maxServiceNameLength) characters, got \(service.utf8.count)")
+    }
     let isValid = service.utf8.allSatisfy { byte in
         (byte >= 0x30 && byte <= 0x39) // '0'-'9'
             || (byte >= 0x41 && byte <= 0x5A) // 'A'-'Z'
@@ -426,6 +461,16 @@ func run(_ args: Args) throws {
     // material -- so no special scoping is needed for it. Validated before
     // the DEK's own tightly-scoped block below.
     try validateServiceCharset(args.serviceName)
+
+    // hkdfguard_wrap_dek no longer creates a KEK on first use (see its own
+    // header comment) -- this tool always wants one to exist before it
+    // wraps, so it explicitly ensures that here. Safe to call every run,
+    // including when a KEK already exists for this service:
+    // hkdfguard_create_kek is idempotent.
+    let createStatus = args.serviceName.withCString { hkdfguard_create_kek($0) }
+    guard createStatus == HKDFGuardStatus.success.rawValue else {
+        throw CLIError("hkdfguard_create_kek failed: \(describeStatus(createStatus))")
+    }
 
     var args = args
     let wrapped: [UInt8]
