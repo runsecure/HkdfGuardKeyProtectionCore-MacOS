@@ -85,17 +85,31 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     /// the SE key becomes unreferenced (and its `dataRepresentation` can
     /// never be reconstructed again) once the keychain item that stores
     /// that representation is gone, which is the actual cleanup unit here.
-    private static func deleteKEK(service: String) {
+    /// The attributes identifying `service`'s KEK item *in the keychain this
+    /// process's mode uses* — mirroring the library's own
+    /// `keychainItemAttributes`. Hosted in the entitled HkdfGuardTestHost
+    /// app the mode is data-protection, and a plain legacy query would
+    /// silently miss every item the library creates.
+    private static func keychainQuery(service: String) -> [String: Any] {
         // The library lowercases `service` before storing (see
-        // `normalizedService`), and legacy-keychain service matching is
-        // case-sensitive — deleting with the caller's original spelling
-        // (`appA`, an uppercase UUID) silently misses and leaks the item.
-        let query: [String: Any] = [
+        // `normalizedService`), and service matching is case-sensitive —
+        // querying with the caller's original spelling (`appA`, an
+        // uppercase UUID) would silently miss and leak the item.
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service.lowercased(),
-            kSecAttrAccount as String: hkdfguardKeychainAccount
+            kSecAttrAccount as String: hkdfguardKeychainAccount,
+            kSecAttrSynchronizable as String: false,
         ]
-        SecItemDelete(query as CFDictionary)
+        if case .dataProtection(let accessGroup) = hkdfguardKeychainMode {
+            query[kSecUseDataProtectionKeychain as String] = true
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
+    }
+
+    private static func deleteKEK(service: String) {
+        SecItemDelete(keychainQuery(service: service) as CFDictionary)
     }
 
     private static func kekExists(service: String) -> (status: Int32, exists: Bool) {
@@ -349,19 +363,67 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
 
     // MARK: - Keychain mode (hybrid)
 
-    @Test func keychainModeInTheTestHostIsLegacy() {
-        // The xctest agent carries only `com.apple.security.get-task-allow`
-        // -- no `keychain-access-groups` -- so the library must pick the
-        // legacy login keychain here, and that is the mode every other test
-        // in this suite exercises. (Exercising the data-protection mode for
-        // real needs a Team-signed host app with a provisioning profile.)
+    @Test func keychainModeMatchesTheHostProcessEntitlement() {
+        // Whatever process hosts this bundle decides the mode: the plain
+        // xctest agent carries only get-task-allow (legacy); the entitled
+        // HkdfGuardTestHost app carries keychain-access-groups
+        // (data-protection). Read the entitlement independently here and
+        // assert the library agrees -- in its internal enum and via the C
+        // ABI -- so a host-configuration mistake shows up as this one
+        // failure instead of as a mystery elsewhere in the suite.
+        var entitledGroup: String?
+        if let task = SecTaskCreateFromSelf(nil),
+           let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
+           let groups = value as? [String] {
+            entitledGroup = groups.first(where: { !$0.isEmpty })
+        }
+
         var mode: Int32 = -1
         #expect(hkdfguard_keychain_mode(outMode: &mode) == 0)
-        #expect(mode == 0)
-        #expect(hkdfguardKeychainMode == .legacy)
+        if let entitledGroup {
+            #expect(mode == 1, "entitled for \(entitledGroup); expected data-protection mode")
+            #expect(hkdfguardKeychainMode == .dataProtection(accessGroup: entitledGroup))
+        } else {
+            #expect(mode == 0, "no keychain-access-groups entitlement; expected legacy mode")
+            #expect(hkdfguardKeychainMode == .legacy)
+        }
     }
 
-    @Test func dataProtectionModeWithoutEntitlementIsAccessDeniedNotNotFound() {
+    @Test(.enabled(if: hkdfguardKeychainMode != .legacy, "requires the entitled HkdfGuardTestHost (data-protection mode)"))
+    func dataProtectionModeStoresItemsOnlyInTheDataProtectionKeychain() {
+        // Hosted in the entitled app: a provisioned KEK must be visible
+        // through a data-protection query in the shared access group and
+        // invisible to a legacy login-keychain query -- the two keychains
+        // are disjoint, which is the whole "same mode" invariant.
+        let service = "com.hkdfguard.tests.dataprotection.entitled"
+        defer { Self.deleteKEK(service: service) }
+        guard case .dataProtection(let accessGroup) = hkdfguardKeychainMode else { return }
+        #expect(accessGroup.hasSuffix(".com.hkdfguard.keys"), "unexpected access group \(accessGroup)")
+
+        #expect(Self.createKEK(service: service) == 0)
+        #expect(Self.kekExists(service: service).exists == true)
+
+        var dpQuery = Self.keychainQuery(service: service)
+        dpQuery[kSecReturnAttributes as String] = true
+        var dpItem: CFTypeRef?
+        #expect(SecItemCopyMatching(dpQuery as CFDictionary, &dpItem) == errSecSuccess)
+        #expect((dpItem as? [String: Any])?[kSecAttrAccessGroup as String] as? String == accessGroup)
+
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: hkdfguardKeychainAccount,
+            kSecReturnAttributes as String: true,
+        ]
+        var legacyItem: CFTypeRef?
+        #expect(SecItemCopyMatching(legacyQuery as CFDictionary, &legacyItem) == errSecItemNotFound)
+
+        // The library's own view agrees: legacy mode sees no key here.
+        #expect(HkdfGuardKeyProtectionEnclave.kekExists(service: service, mode: .legacy).exists == false)
+    }
+
+    @Test(.enabled(if: hkdfguardKeychainMode == .legacy, "only meaningful in an unentitled (legacy-mode) host"))
+    func dataProtectionModeWithoutEntitlementIsAccessDeniedNotNotFound() {
         // Drives the internal functions in data-protection mode from this
         // unentitled process. securityd answers errSecMissingEntitlement
         // (-34018); the library must report that as keychainAccessDenied
@@ -403,12 +465,10 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         defer { Self.deleteKEK(service: service) }
 
         let garbage = Data((0..<48).map { UInt8($0) })
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: hkdfguardKeychainAccount,
-            kSecValueData as String: garbage
-        ]
+        // Planted in whichever keychain this process's mode uses, so the
+        // library actually finds it.
+        var attributes = Self.keychainQuery(service: service)
+        attributes[kSecValueData as String] = garbage
         #expect(SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess)
 
         let exists = Self.kekExists(service: service)

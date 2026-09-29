@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs HkdfGuardKeyProtectionEnclaveTests hosted inside HkdfGuardTestHost.app
+  (the DebugHosted configuration sets TEST_HOST), so the whole suite executes
+  in data-protection keychain mode, and builds the bundled CLI
+  (hkdfguard-v1-initialize.app) alongside it for the cross-process
+  data-protection round-trip test.
+
+  Both app targets need a Mac App Development provisioning profile carrying
+  the com.hkdfguard.keys keychain access group. Run with:
+
+      xcodebuild test -scheme HkdfGuardKeyProtectionEnclaveTests-Hosted \
+          -allowProvisioningUpdates
+
+  The plain HkdfGuardKeyProtectionEnclaveTests scheme stays unhosted (legacy
+  mode) and needs no profile.
+-->
+<Scheme
+   LastUpgradeVersion = "2700"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES"
+      buildArchitectures = "Automatic">
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C1A7E5700001000000000001"
+               BuildableName = "HkdfGuardTestHost.app"
+               BlueprintName = "HkdfGuardTestHost"
+               ReferencedContainer = "container:HkdfGuardKeyProtectionEnclave.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C1A7E5700002000000000001"
+               BuildableName = "hkdfguard-v1-initialize.app"
+               BlueprintName = "hkdfguard-v1-initialize-app"
+               ReferencedContainer = "container:HkdfGuardKeyProtectionEnclave.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A8009862305CDD39003A51EC"
+               BuildableName = "HkdfGuardKeyProtectionEnclaveTests.xctest"
+               BlueprintName = "HkdfGuardKeyProtectionEnclaveTests"
+               ReferencedContainer = "container:HkdfGuardKeyProtectionEnclave.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "DebugHosted"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "NO">
+      <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A8009862305CDD39003A51EC"
+               BuildableName = "HkdfGuardKeyProtectionEnclaveTests.xctest"
+               BlueprintName = "HkdfGuardKeyProtectionEnclaveTests"
+               ReferencedContainer = "container:HkdfGuardKeyProtectionEnclave.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+   </TestAction>
+   <LaunchAction
+      buildConfiguration = "DebugHosted"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      ignoresPersistentStateOnLaunch = "NO"
+      debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
+      allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "C1A7E5700001000000000001"
+            BuildableName = "HkdfGuardTestHost.app"
+            BlueprintName = "HkdfGuardTestHost"
+            ReferencedContainer = "container:HkdfGuardKeyProtectionEnclave.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </LaunchAction>
+   <ProfileAction
+      buildConfiguration = "Release"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      savedToolIdentifier = ""
+      useCustomWorkingDirectory = "NO"
+      debugDocumentVersioning = "YES">
+   </ProfileAction>
+   <AnalyzeAction
+      buildConfiguration = "DebugHosted">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Release"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
+</Scheme>

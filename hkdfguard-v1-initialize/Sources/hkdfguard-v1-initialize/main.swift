@@ -319,12 +319,6 @@ func parseWrap(_ arguments: [String]) throws -> Command {
                 throw CLIError("\(arg) requires a path")
             }
             dekSources.append(.file(value))
-        case "--dek", "-d":
-            // Rejected explicitly, with the reason, rather than falling
-            // through to a generic "unrecognized argument" -- anyone
-            // reaching for the Linux tool's flag should learn why it isn't
-            // here and what to use instead.
-            throw CLIError("\(arg) is not supported: a DEK on the command line is visible via ps and recorded in shell history; use \(dekSourceFlags)")
         default:
             if !arg.hasPrefix("-") {
                 // The key file path used to be positional; say so rather

@@ -87,6 +87,17 @@ struct HkdfGuardCommandLineToolTests {
     private static let interactiveKeychainAccessComment: Comment =
         "requires a one-time interactive keychain approval; set HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1 to opt in — see this suite's doc comment"
 
+    /// The cross-process round trips below read, in *this* process, a KEK
+    /// the bare SwiftPM-built CLI created. That CLI is a plain Mach-O with
+    /// no entitlements, so it always runs in legacy keychain mode; the read
+    /// can only succeed if this host runs in legacy mode too (the two
+    /// keychains are disjoint). Hosted in the entitled HkdfGuardTestHost app
+    /// these are skipped, and the data-protection equivalent -- provisioned
+    /// by the *bundled* CLI, no prompt involved -- runs instead (see the end
+    /// of this file).
+    private static let legacyCrossProcessRoundTripEnabled =
+        interactiveKeychainAccessEnabled && hkdfguardKeychainMode == .legacy
+
     /// Every test below that actually runs the CLI's wrap path needs a
     /// real Secure Enclave — on a CI/VM runner (`SecureEnclave.isAvailable
     /// == false`), the CLI itself would fail with `keyUnavailable` before
@@ -370,7 +381,7 @@ struct HkdfGuardCommandLineToolTests {
 
     // MARK: - Round trip: CLI wraps, application code decrypts
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
+    @Test(.enabled(if: legacyCrossProcessRoundTripEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliWrappedDekIsRecoveredByApplicationCode() throws {
         let service = "com.hkdfguard.tests.cli.roundtrip"
         defer { Self.deleteKEK(service: service) }
@@ -418,7 +429,7 @@ struct HkdfGuardCommandLineToolTests {
 
     // MARK: - File handling: refuses to clobber, --force overwrites correctly
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
+    @Test(.enabled(if: legacyCrossProcessRoundTripEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliRefusesToOverwriteWithoutForce() throws {
         let service = "com.hkdfguard.tests.cli.no.overwrite"
         defer { Self.deleteKEK(service: service) }
@@ -447,7 +458,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(recovered.dek == firstDek)
     }
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
+    @Test(.enabled(if: legacyCrossProcessRoundTripEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliForceOverwritesWithNewDek() throws {
         let service = "com.hkdfguard.tests.cli.force.overwrite"
         defer { Self.deleteKEK(service: service) }
@@ -618,7 +629,7 @@ struct HkdfGuardCommandLineToolTests {
         #expect(wrapped.count == 156)
     }
 
-    @Test(.enabled(if: interactiveKeychainAccessEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
+    @Test(.enabled(if: legacyCrossProcessRoundTripEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
     func cliDekStdinDekIsRecoveredByApplicationCode() throws {
         let service = "com.hkdfguard.tests.cli.dek.stdin.roundtrip"
         defer { Self.deleteKEK(service: service) }
@@ -798,5 +809,76 @@ struct HkdfGuardCommandLineToolTests {
         let result = try Self.runCLI(["provision", "--service-name", "com.hkdfguard.tests.cli.provision.extra", "--dek-stdin"])
         #expect(result.exitCode == 2)
         #expect(result.stderr.contains("unrecognized argument"))
+    }
+
+    // MARK: - Data-protection mode: the bundled CLI provisions, the entitled host unwraps
+
+    /// The bundled build of the CLI (`hkdfguard-v1-initialize-app` target):
+    /// the same main.swift inside an app bundle with an embedded provisioning
+    /// profile and the shared `com.hkdfguard.keys` access group, which is
+    /// what lets it run in data-protection mode. Built into the same
+    /// products directory as the host app this bundle runs in.
+    private static let bundledCLIPath = Bundle.main.bundleURL
+        .deletingLastPathComponent()
+        .appendingPathComponent("hkdfguard-v1-initialize.app/Contents/MacOS/hkdfguard-v1-initialize")
+        .path
+
+    private static let dataProtectionRoundTripEnabled =
+        hkdfguardKeychainMode != .legacy && FileManager.default.fileExists(atPath: bundledCLIPath)
+
+    /// Deletes a KEK item from the keychain *this process's mode* uses --
+    /// the only way to clean up a data-protection item, which the
+    /// legacy-only `security` tool used by `deleteKEK` cannot see.
+    private static func deleteKEKInProcess(service: String) {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service.lowercased(),
+            kSecAttrAccount as String: hkdfguardKeychainAccount,
+            kSecAttrSynchronizable as String: false,
+        ]
+        if case .dataProtection(let accessGroup) = hkdfguardKeychainMode {
+            query[kSecUseDataProtectionKeychain as String] = true
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        SecItemDelete(query as CFDictionary)
+    }
+
+    @Test(.enabled(if: dataProtectionRoundTripEnabled && SecureEnclave.isAvailable, "requires the entitled HkdfGuardTestHost and the bundled CLI (data-protection mode)"))
+    func bundledCliProvisionsAndWrapsInDataProtectionModeAndEntitledHostUnwraps() throws {
+        // The production topology end to end, with no interactive prompt:
+        // a Team-signed, entitled provisioner (the bundled CLI) creates the
+        // KEK and wraps a DEK in the shared access group; a different
+        // Team-signed, entitled process (this host) unwraps it through the
+        // library. securityd grants the access from the signed identities
+        // alone -- the thing legacy mode can only do after a human clicks
+        // Allow.
+        let service = "com.hkdfguard.tests.cli.dataprotection.roundtrip"
+        defer { Self.deleteKEKInProcess(service: service) }
+        let keyFilePath = Self.makeTempFilePath()
+        defer { try? FileManager.default.removeItem(atPath: keyFilePath) }
+        let cli = URL(fileURLWithPath: Self.bundledCLIPath)
+
+        let provision = try Self.run(cli, ["provision", "--service-name", service])
+        #expect(provision.exitCode == 0, "provision failed: \(provision.stderr)")
+        #expect(provision.stdout.contains("keychain: data-protection"), "stdout: \(provision.stdout)")
+
+        let dek = Self.randomDEK()
+        let wrap = try Self.run(
+            cli,
+            ["wrap", "--key-file-path", keyFilePath, "--service-name", service, "--dek-stdin"],
+            stdin: Self.base64Stdin(dek)
+        )
+        #expect(wrap.exitCode == 0, "wrap failed: \(wrap.stderr)")
+        #expect(wrap.stdout.contains("keychain: data-protection"), "stdout: \(wrap.stdout)")
+
+        let wrapped = try Array(Data(contentsOf: URL(fileURLWithPath: keyFilePath)))
+        #expect(wrapped.count == 156)
+        let recovered = Self.unwrapInApplicationCode(wrapped, service: service)
+        #expect(recovered.status == 0, "unwrap in the entitled host failed with \(recovered.status)")
+        #expect(recovered.dek == dek)
+
+        // Disjoint keychains: the legacy login keychain (what the bare CLI
+        // and the `security` tool see) must have no trace of this KEK.
+        #expect(!Self.kekItemExists(service: service))
     }
 }

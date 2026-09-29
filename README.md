@@ -201,7 +201,9 @@ printf '%s' "$DEK_B64" | hkdfguard-v1-initialize wrap -kf /etc/example/ingest.ke
 | `HkdfGuardKeyProtectionEnclave` | `HkdfGuardKeyProtectionEnclave.framework` | Embed in a signed macOS app; carries the public header and an app-sandbox entitlement |
 | `HkdfGuardKeyProtectionEnclaveDylib` | `HkdfGuard.Kms.MacOS.v1.dylib` | Flat shared library for `dlopen`-based FFI from arbitrary, often unsandboxed, host processes |
 | `HkdfGuardKeyProtectionEnclaveTests` | `.xctest` | Swift Testing suites for the C entry points and for the CLI as a real subprocess |
-| `hkdfguard-v1-initialize/` | `hkdfguard-v1-initialize` | SwiftPM package for the CLI; links the dylib through its C ABI only |
+| `hkdfguard-v1-initialize/` | `hkdfguard-v1-initialize` | SwiftPM package for the CLI; links the dylib through its C ABI only. Bare Mach-O → legacy keychain mode |
+| `hkdfguard-v1-initialize-app` | `hkdfguard-v1-initialize.app` | The same `main.swift` as an app bundle with the `com.hkdfguard.keys` access group and hardened runtime, embedding the dylib — the build of the CLI that runs in data-protection mode |
+| `HkdfGuardTestHost` | `HkdfGuardTestHost.app` | Minimal entitled host app for the test bundle, so the suite can run in data-protection mode (see Tests) |
 
 All library targets build from the single `HkdfGuardKeyProtectionEnclave.swift`.
 Requires **Swift 6.2+** (compile-time `#error` guard) and **macOS 13.0+**.
@@ -288,15 +290,40 @@ Two Swift Testing suites, both `.serialized`:
   subprocess: `provision`/`wrap` semantics, DEK sources, rejected
   arguments, `--force` symlink/FIFO refusal, file permissions, exit codes.
 
-Both need a real Secure Enclave and are skipped on CI/VM runners. The tests
-that cross the CLI→application keychain boundary (a differently-signed
-process reading an item the CLI created) trigger a one-time interactive
-keychain prompt and are opt-in: set
-`HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1` and be present to click Allow.
-Every test that provisions a key deletes its keychain item afterward, so a
-run leaves the keychain clean. Exercising data-protection mode end to end
-needs a Team-signed host application with a provisioning profile set as
-the test target's Host Application.
+Both need a real Secure Enclave and are skipped on CI/VM runners. Every test
+that provisions a key deletes its keychain item afterward — in whichever
+keychain the host process's mode uses — so a run leaves the keychain clean.
+
+### Two ways to run the suite
+
+**Unhosted (legacy mode) — the default.** `xcodebuild test -scheme
+HkdfGuardKeyProtectionEnclaveTests` runs the bundle in the plain `xctest`
+agent, which has no keychain entitlement, so the library runs in legacy mode
+and the data-protection-only tests are skipped. Needs no provisioning
+profile. The legacy cross-process round trips (this process reading an item
+the bare CLI created) trigger a one-time interactive keychain prompt and are
+opt-in: set `HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1` and be present to
+click Allow.
+
+**Hosted (data-protection mode).** `xcodebuild test -scheme
+HkdfGuardKeyProtectionEnclaveTests-Hosted -allowProvisioningUpdates` uses
+the `DebugHosted` configuration, which sets `TEST_HOST` to
+`HkdfGuardTestHost.app` — a Team-signed app entitled for the
+`com.hkdfguard.keys` access group — so the whole suite runs in
+data-protection mode, and additionally builds the bundled CLI
+(`hkdfguard-v1-initialize.app`, same group). That enables the test that
+matters most: the bundled CLI provisions a KEK and wraps a DEK, and this
+differently-signed host unwraps it through the library **with no
+interactive prompt** — the production topology, with access granted by
+securityd from the two signed identities alone.
+
+Both app targets need a **Mac App Development provisioning profile**, which
+Xcode's automatic signing creates once this Mac is registered as a device in
+your developer account (Certificates, Identifiers & Profiles → Devices →
+macOS, using the Provisioning UDID from *About This Mac → System Report →
+Hardware*; or open the project in Xcode, select `HkdfGuardTestHost`, and let
+Signing & Capabilities register it). Until then the hosted scheme fails at
+provisioning and the unhosted scheme is unaffected.
 
 ## Differences from the Linux tool
 

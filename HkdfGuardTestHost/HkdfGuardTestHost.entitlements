@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	 The shared HkdfGuard keychain access group. Listed FIRST (here, only):
+	 the library stores KEK items under the first group in this array. The
+	 bundled CLI (hkdfguard-v1-initialize.app) declares the same group, so
+	 KEKs it provisions are readable by tests hosted in this app with no
+	 interactive prompt. $(AppIdentifierPrefix) is the Team ID, substituted
+	 at signing time.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.hkdfguard.keys</string>
+	</array>
+</dict>
+</plist>

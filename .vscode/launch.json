@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HkdfGuardKeyProtectionCore-MacOS}/hkdfguard-v1-initialize",
+            "name": "Debug hkdfguard-v1-initialize (hkdfguard-v1-initialize)",
+            "target": "hkdfguard-v1-initialize",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug hkdfguard-v1-initialize (hkdfguard-v1-initialize)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:HkdfGuardKeyProtectionCore-MacOS}/hkdfguard-v1-initialize",
+            "name": "Release hkdfguard-v1-initialize (hkdfguard-v1-initialize)",
+            "target": "hkdfguard-v1-initialize",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release hkdfguard-v1-initialize (hkdfguard-v1-initialize)"
+        }
+    ]
+}
