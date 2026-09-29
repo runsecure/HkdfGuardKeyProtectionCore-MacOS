@@ -20,6 +20,18 @@ private let hkdfguardEphemeralPublicKeyLength = 64
 /// every wrapped payload — see `kekFingerprint` below.
 private let hkdfguardFingerprintLength = 32
 
+/// AES-GCM nonce and tag lengths, as fixed by CryptoKit's `AES.GCM`.
+private let hkdfguardGCMNonceLength = 12
+private let hkdfguardGCMTagLength = 16
+
+/// The exact length of every wrapped payload: fingerprint || ephemeral
+/// public key || nonce || ciphertext (same length as the DEK) || tag.
+/// Known up front, so both wrap and unwrap can reject a wrong-sized buffer
+/// before any keychain or Secure Enclave work.
+private let hkdfguardWrappedLength =
+    hkdfguardFingerprintLength + hkdfguardEphemeralPublicKeyLength
+    + hkdfguardGCMNonceLength + hkdfguardDekLength + hkdfguardGCMTagLength
+
 /// Context string binding the HKDF-derived key to this specific wrap
 /// scheme, so it can never be reused as a key for anything else.
 private let hkdfguardSharedInfo = Data("com.hkdfguard.macos.wrap.v1".utf8)
@@ -184,8 +196,25 @@ private enum HKDFGuardStatus: Int32 {
 
 // MARK: - Secure Enclave KEK lookup / provisioning
 
-/// Access control restricting the Secure Enclave key to this device, usable
-/// only while the device is unlocked.
+/// The access policy baked into every KEK at creation — what the Secure
+/// Enclave enforces on each use of the key, independent of which keychain
+/// (see `KeychainMode`) the key's item lives in. Fixed; there is no
+/// per-service override.
+///
+/// - `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`: usable only while the
+///   device is unlocked, and never migrated to another device (no backup or
+///   restore can carry it). "Unlocked" means the login user's keybag: a
+///   LaunchDaemon or SSH session on a Mac with no unlocked GUI session may
+///   find the key unavailable — surfacing as `keyGenerationFailed`/
+///   `decryptionFailed` from the enclave, or `keychainAccessDenied` from a
+///   locked keychain. Headless consumers should run as a LaunchAgent inside
+///   a logged-in session, or otherwise ensure the login keychain is
+///   unlocked.
+/// - `.privateKeyUsage` alone — no `.userPresence`/`.biometryAny`, so no
+///   Touch ID or password prompt is ever required to *use* the key. That is
+///   deliberate: this library serves unattended services. It means the
+///   protection boundary is "which processes may read the keychain item"
+///   (the keychain mode's job), not "a human approved this use".
 private func makeAccessControl() -> SecAccessControl? {
     var error: Unmanaged<CFError>?
     return SecAccessControlCreateWithFlags(
@@ -374,8 +403,20 @@ func createKEK(service: String, mode: KeychainMode = hkdfguardKeychainMode) -> I
         return HKDFGuardStatus.keyGenerationFailed.rawValue
     }
 
+    // The SEP-wrapped key blob is the very credential the keychain item
+    // exists to protect: usable by any process on this device that holds
+    // it, while unlocked. Zero this process's copy on every exit path once
+    // the keychain has it -- including the race-loser path below, where it
+    // is never stored at all and would otherwise linger until deallocation.
+    var representation = newKey.dataRepresentation
+    defer {
+        _ = representation.withUnsafeMutableBytes { raw in
+            raw.initializeMemory(as: UInt8.self, repeating: 0)
+        }
+    }
+
     let status = storeKEKDataRepresentation(
-        newKey.dataRepresentation,
+        representation,
         service: service,
         mode: mode
     )
@@ -522,6 +563,14 @@ private func wrapDekCore(
         return HKDFGuardStatus.invalidInputLength.rawValue
     }
 
+    // The output size is a constant, so a too-small buffer is reported here
+    // -- before any keychain lookup or Secure Enclave operation, and without
+    // ever producing a ciphertext the caller cannot receive.
+    guard Int(outLen.pointee) >= hkdfguardWrappedLength else {
+        outLen.pointee = Int32(hkdfguardWrappedLength)
+        return HKDFGuardStatus.outputBufferTooSmall.rawValue
+    }
+
     let fingerprint: Data
     let ephemeralPublicRaw: Data
     let sealedBox: AES.GCM.SealedBox
@@ -599,8 +648,11 @@ private func wrapDekCore(
 /// provisioner and its consumers must agree on it.
 @_cdecl("hkdfguard_keychain_mode")
 public func hkdfguard_keychain_mode(
-    outMode: UnsafeMutablePointer<Int32>
+    outMode: UnsafeMutablePointer<Int32>?
 ) -> Int32 {
+    guard let outMode else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
     switch hkdfguardKeychainMode {
     case .legacy:
         outMode.pointee = 0
@@ -617,12 +669,17 @@ public func hkdfguard_keychain_mode(
 /// the caller's variable is never left in an undefined state.
 @_cdecl("hkdfguard_kek_exists")
 public func hkdfguard_kek_exists(
-    servicePtr: UnsafePointer<CChar>,
-    outExists: UnsafeMutablePointer<Int32>
+    servicePtr: UnsafePointer<CChar>?,
+    outExists: UnsafeMutablePointer<Int32>?
 ) -> Int32 {
+    // NULL from a C caller is a contract violation, reported rather than
+    // dereferenced -- here and in every entry point below.
+    guard let outExists else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
     outExists.pointee = 0
 
-    guard let service = normalizedService(from: servicePtr) else {
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 
@@ -638,9 +695,9 @@ public func hkdfguard_kek_exists(
 /// made implicitly inside a single combined "ensure" call.
 @_cdecl("hkdfguard_create_kek")
 public func hkdfguard_create_kek(
-    servicePtr: UnsafePointer<CChar>
+    servicePtr: UnsafePointer<CChar>?
 ) -> Int32 {
-    guard let service = normalizedService(from: servicePtr) else {
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 
@@ -649,13 +706,16 @@ public func hkdfguard_create_kek(
 
 @_cdecl("hkdfguard_wrap_dek")
 public func hkdfguard_wrap_dek(
-    servicePtr: UnsafePointer<CChar>,
-    dekPtr: UnsafePointer<UInt8>,
+    servicePtr: UnsafePointer<CChar>?,
+    dekPtr: UnsafePointer<UInt8>?,
     dekLen: Int32,
-    outPtr: UnsafeMutablePointer<UInt8>,
-    outLen: UnsafeMutablePointer<Int32>
+    outPtr: UnsafeMutablePointer<UInt8>?,
+    outLen: UnsafeMutablePointer<Int32>?
 ) -> Int32 {
-    guard let service = normalizedService(from: servicePtr) else {
+    guard let dekPtr, let outPtr, let outLen else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 
@@ -675,11 +735,14 @@ private func generateRandomDek() -> Data? {
 
 @_cdecl("hkdfguard_generate_and_wrap_dek")
 public func hkdfguard_generate_and_wrap_dek(
-    servicePtr: UnsafePointer<CChar>,
-    outPtr: UnsafeMutablePointer<UInt8>,
-    outLen: UnsafeMutablePointer<Int32>
+    servicePtr: UnsafePointer<CChar>?,
+    outPtr: UnsafeMutablePointer<UInt8>?,
+    outLen: UnsafeMutablePointer<Int32>?
 ) -> Int32 {
-    guard let service = normalizedService(from: servicePtr) else {
+    guard let outPtr, let outLen else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
     
@@ -708,20 +771,35 @@ public func hkdfguard_generate_and_wrap_dek(
 
 @_cdecl("hkdfguard_unwrap_dek")
 public func hkdfguard_unwrap_dek(
-    servicePtr: UnsafePointer<CChar>,
-    wrappedPtr: UnsafePointer<UInt8>,
+    servicePtr: UnsafePointer<CChar>?,
+    wrappedPtr: UnsafePointer<UInt8>?,
     wrappedLen: Int32,
-    outPtr: UnsafeMutablePointer<UInt8>,
-    outLen: UnsafeMutablePointer<Int32>
+    outPtr: UnsafeMutablePointer<UInt8>?,
+    outLen: UnsafeMutablePointer<Int32>?
 ) -> Int32 {
-    let fixedPrefixLength = hkdfguardFingerprintLength + hkdfguardEphemeralPublicKeyLength
-    guard wrappedLen > Int32(fixedPrefixLength) else {
+    guard let wrappedPtr, let outPtr, let outLen else {
         return HKDFGuardStatus.invalidInputLength.rawValue
     }
 
-    guard let service = normalizedService(from: servicePtr) else {
+    // Every payload this library produces is exactly hkdfguardWrappedLength
+    // bytes, so anything else is rejected before it is read.
+    guard wrappedLen == Int32(hkdfguardWrappedLength) else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+
+    // The plaintext size is a constant too: a too-small buffer is reported
+    // before any keychain lookup or Secure Enclave operation, so a DEK is
+    // never decrypted into memory for a caller who cannot receive it.
+    guard Int(outLen.pointee) >= hkdfguardDekLength else {
+        outLen.pointee = Int32(hkdfguardDekLength)
+        return HKDFGuardStatus.outputBufferTooSmall.rawValue
+    }
+
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
+
+    let fixedPrefixLength = hkdfguardFingerprintLength + hkdfguardEphemeralPublicKeyLength
 
     let storedFingerprint = Data(bytes: wrappedPtr, count: hkdfguardFingerprintLength)
     let ephemeralPublicRaw = Data(bytes: wrappedPtr + hkdfguardFingerprintLength, count: hkdfguardEphemeralPublicKeyLength)

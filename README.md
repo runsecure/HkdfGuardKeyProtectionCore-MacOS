@@ -1,113 +1,210 @@
-# KeyProtectionCore-MacOS
+# HkdfGuardKeyProtectionCore-MacOS
 
-Core Key and Key Material Protection for macOS interop across HkdfGuard libraries.
+Core key and key-material protection for macOS, for interop across the
+HkdfGuard libraries. Sibling of `HkdfGuardKeyProtectionCore-Linux`.
 
-`HkdfGuardKeyProtectionEnclave` wraps and unwraps Data Encryption Keys (DEKs)
-using a Secure Enclave–backed key, exposed as a plain C ABI so it can be
-called from Swift, Objective-C, or any other language capable of loading a
-Mach-O framework/dylib and calling C functions (Python `ctypes`, Go `cgo`,
-Node, C#, Java JNA, etc.).
+`HkdfGuardKeyProtectionEnclave` wraps and unwraps 32-byte Data Encryption
+Keys (DEKs) under a per-service Key Encryption Key (KEK) that lives in the
+device's Secure Enclave, exposed as a plain C ABI so it can be called from
+Swift, Objective-C, C/C++, or any language that can load a Mach-O dylib
+(Python `ctypes`, Go `cgo`, .NET P/Invoke, Java JNA, …). A companion
+command-line tool, `hkdfguard-v1-initialize`, provisions KEKs and wraps DEKs
+for pipelines.
 
 ## What it does
 
-Each calling application identifies itself with a **service string** (see
-below). The first time a given service wraps or unwraps anything, the
-library generates a P-256 key pair inside the device's Secure Enclave and
-persists an opaque, device-bound reference to it in the keychain — the
-private key material itself never leaves the Secure Enclave and can never be
-extracted, only used via hardware-mediated operations.
+Each calling application identifies itself with a **service name** (see
+below). A service's KEK is a P-256 key-agreement key generated inside the
+Secure Enclave; its private half never leaves the enclave and can only be
+*used*, never extracted. What the library persists in the keychain is the
+enclave's opaque, device-bound reference to that key.
 
-To wrap a 32-byte DEK:
+Provisioning is explicit. `hkdfguard_create_kek` is the only function that
+creates a KEK; every wrap/unwrap function requires one to already exist and
+fails with `kekNotFound` (-10) otherwise. Nothing is ever created "on first
+use".
 
-1. Generate a fresh ephemeral P-256 key pair (discarded after this call).
-2. Perform ECDH between the ephemeral private key and the service's Secure
-   Enclave public key (the enclave does its side of the exchange in
-   hardware).
-3. Derive an AES-256 key from the resulting shared secret via HKDF-SHA512,
-   salted with the ephemeral public key.
-4. Encrypt the DEK with AES-GCM under that derived key.
-5. Output the ephemeral public key alongside the AES-GCM ciphertext — the
-   receiver needs the ephemeral public key to reconstruct the same shared
-   secret, since it's generated fresh per call and never stored anywhere.
+To wrap a DEK:
 
-Unwrapping reverses this, with the Secure Enclave performing its side of the
-ECDH using its persisted private key. This is a standard ECIES construction;
-it's what gives two wraps of the same DEK under the same service different
-ciphertext every time (see `twoWrapsOfSameDEKProduceDifferentCiphertext` in
-the test suite), and it means an unwrap under one service can never succeed
-against a blob wrapped under a different service — each service gets its own
-independent Secure Enclave key, fully isolated from every other service's.
+1. Generate a fresh ephemeral P-256 key pair (discarded after the call).
+2. ECDH between the ephemeral private key and the service's KEK public key.
+3. Derive an AES-256 key via HKDF-SHA512, salted with the ephemeral public
+   key and bound to the scheme label, both public keys, and the service.
+4. AES-256-GCM-encrypt the DEK under a random nonce, with the service name
+   and the KEK fingerprint as additional authenticated data.
 
-## Wrapped format
+Unwrapping reverses this, with the enclave performing its side of the ECDH.
+Because each wrap uses a fresh ephemeral key *and* a fresh nonce, the
+derived key is single-use — two wraps of the same DEK never produce the
+same bytes — and a payload wrapped under one service can never be opened
+under another.
+
+## Wrapped payload format
+
+Always exactly **156 bytes**:
 
 ```
-[ephemeral P-256 public key, 64 bytes raw (x || y)]
-[AES-GCM combined: 12-byte nonce || ciphertext || 16-byte tag]
+[ 32-byte KEK fingerprint — SHA-256 of the KEK's public key ]
+[ 64-byte ephemeral P-256 public key, raw x || y             ]
+[ 12-byte AES-GCM nonce || 32-byte ciphertext || 16-byte tag ]
 ```
 
-For a 32-byte DEK this is always exactly **124 bytes** (64 + 12 + 32 + 16).
+The fingerprint identifies *which* KEK a payload was wrapped under. On
+unwrap it is compared to the current KEK's public key **before** any ECDH
+or decryption is attempted, so "wrong or rotated KEK" is reported as
+`fingerprintMismatch` (-16) rather than as a generic decryption failure.
+It is also folded into the AES-GCM authenticated data, so tampering with it
+fails the tag check as well.
+
+There is no in-band format version. **A change of payload format is
+signalled by adopting a new service name** (and therefore a new KEK).
+
+## Service names
+
+1–128 bytes, each an ASCII letter, digit, or `.` — typically reverse-DNS.
+Matched **case-insensitively**: every entry point lowercases the name before
+validation, storage, and lookup. Anything else (empty, over-length, any
+non-ASCII byte, `-`, `_`, …) is `invalidServiceIdentifier` (-8). The rule is
+enforced on bytes, identically in the library, the CLI, and the Linux tool.
 
 ## C ABI
 
-Declared in [`HkdfGuardKeyProtectionEnclave.h`](HkdfGuardKeyProtectionEnclave/HkdfGuardKeyProtectionEnclave.h):
+Declared in
+[`HkdfGuardKeyProtectionEnclave.h`](HkdfGuardKeyProtectionEnclave/HkdfGuardKeyProtectionEnclave.h)
+(plain C; `extern "C"`-guarded; nullability-annotated). All pointers are
+required — a NULL is reported, never dereferenced.
 
 ```c
-int32_t hkdfguard_wrap_dek(
-    const char* service,
-    const uint8_t* dek,
-    int32_t dek_len,
-    uint8_t* out,
-    int32_t* out_len
-);
-
-int32_t hkdfguard_unwrap_dek(
-    const char* service,
-    const uint8_t* wrapped,   // the wrapped blob produced by wrap_dek
-    int32_t wrapped_len,
-    uint8_t* out,
-    int32_t* out_len
-);
+int32_t hkdfguard_keychain_mode(int32_t* out_mode);          // 0 legacy, 1 data-protection
+int32_t hkdfguard_kek_exists(const char* service, int32_t* out_exists);
+int32_t hkdfguard_create_kek(const char* service);            // the only function that creates a KEK
+int32_t hkdfguard_wrap_dek(const char* service, const uint8_t* dek, int32_t dek_len,
+                           uint8_t* out, int32_t* out_len);
+int32_t hkdfguard_unwrap_dek(const char* service, const uint8_t* wrapped, int32_t wrapped_len,
+                             uint8_t* out, int32_t* out_len);
+int32_t hkdfguard_generate_and_wrap_dek(const char* service, uint8_t* out, int32_t* out_len);
 ```
 
-- **`service`** — a non-empty, null-terminated UTF-8 string identifying the
-  calling application. Pick one identifier per application and keep it
-  stable; wrapping under one service and unwrapping under another will fail
-  by design.
-- **`out`/`out_len`** — on entry, `*out_len` is the capacity of `out`; on
-  return, it's always set to either the number of bytes actually written
-  (on success) or the number of bytes that would have been required (if the
-  call failed with `outputBufferTooSmall`), so a caller can size a buffer
-  correctly on a second attempt without guessing.
-- The keychain **account** suffix used alongside `service` (`"kek-v1"`) is
-  fixed and internal — only the service varies per caller.
+`*out_len` is the buffer capacity on entry and, on return, either the bytes
+written or — on `outputBufferTooSmall` — the required size (156 for wrap,
+32 for unwrap). Both wrap and unwrap check the capacity, and unwrap checks
+`wrapped_len == 156`, **before** touching the keychain or the enclave, so a
+sizing call costs nothing and a DEK is never decrypted for a caller who
+cannot receive it.
 
 ### Status codes
 
 | Value | Meaning |
 |------:|---------|
-|   `0` | success |
-|  `-1` | `invalidInputLength` — `dek_len`/wrapped blob length is wrong |
-|  `-2` | `outputBufferTooSmall` — `*out_len` has been set to the required size |
-|  `-3` | `keyUnavailable` — the Secure Enclave key could not be obtained |
-|  `-4` | `publicKeyUnavailable` |
-|  `-5` | `encryptionFailed` |
-|  `-6` | `decryptionFailed` — also returned for a wrong/mismatched service |
-|  `-7` | `unexpectedOutputLength` |
-|  `-8` | `missingServiceIdentifier` — `service` was `NULL` or empty |
+| `0`   | success |
+| `-1`  | `invalidInputLength` — `dek_len != 32`, `wrapped_len != 156`, or a NULL buffer/length pointer |
+| `-2`  | `outputBufferTooSmall` — `*out_len` set to the required size |
+| `-3`  | `keyUnavailable` — reserved, no longer returned |
+| `-4`  | `publicKeyUnavailable` |
+| `-5`  | `encryptionFailed` |
+| `-6`  | `decryptionFailed` — AES-GCM authentication failed (altered payload, or wrapped for a different service under the same KEK) |
+| `-7`  | `unexpectedOutputLength` |
+| `-8`  | `invalidServiceIdentifier` |
+| `-9`  | `enclaveUnavailable` — no Secure Enclave on this machine |
+| `-10` | `kekNotFound` — no KEK for this service in this process's keychain mode; call `hkdfguard_create_kek` |
+| `-11` | `kekCorrupted` — an item exists but can't be reconstructed into a key; never auto-replaced |
+| `-12` | `accessControlCreationFailed` |
+| `-13` | `keyGenerationFailed` — the enclave refused to generate a key |
+| `-14` | `keychainWriteFailed` |
+| `-15` | `kekVerificationFailed` — stored, but couldn't be reloaded immediately after |
+| `-16` | `fingerprintMismatch` — payload was wrapped under a different KEK |
+| `-17` | `keychainAccessDenied` — locked keychain / no UI session / ACL denial / declined prompt / missing entitlement. **A key likely exists**; don't create or delete anything |
+| `-18` | `keychainReadFailed` |
+
+## Keychain modes (hybrid)
+
+The KEK's keychain item lives in one of two keychains, chosen once per
+process from the process's **own code-signing entitlements** — never from
+configuration:
+
+| Mode | When | Where the item lives | Cross-process access |
+|---|---|---|---|
+| **data-protection** (1) | the process has a `keychain-access-groups` entitlement — on macOS that means a Team-signed **app bundle with an embedded provisioning profile** | the data-protection keychain, under the first listed access group | decided by securityd from the caller's signed identity: no prompts, no ACLs; any Team-signed bundle listing the same group shares it |
+| **legacy** (0) | no such entitlement — a bare executable (the CLI as a plain Mach-O, a .NET/Python/Go host that `dlopen`s the dylib, the `xctest` agent) | the login keychain | login-keychain lock plus a per-item ACL keyed to the creating binary; other identities get an interactive prompt, or, headless, `-17` |
+
+The two keychains are disjoint: **the process that provisions a service's
+KEK and every process that unwraps under it must run in the same mode**, or
+consumers see `kekNotFound`. `hkdfguard_keychain_mode` reports the mode and
+the CLI prints it on every command. Both modes set
+`kSecAttrSynchronizable = false`; iCloud Keychain never sees these items.
+
+## Access policy and headless use
+
+Every KEK is created with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and
+`privateKeyUsage` only — no user-presence or biometric requirement, so
+using the key never triggers a Touch ID/password prompt. Consequences:
+
+- The key can never leave this device; no backup or restore carries it.
+- "Unlocked" means the login user's keybag. A LaunchDaemon or SSH session on
+  a Mac with no unlocked GUI session may find the key unavailable
+  (`keyGenerationFailed`/`decryptionFailed` from the enclave, or
+  `keychainAccessDenied` from a locked keychain). Run headless consumers as
+  a LaunchAgent in a logged-in session, or ensure the login keychain is
+  unlocked.
+- The protection boundary is *which processes may read the keychain item*
+  (the keychain mode's job), not *a human approved this use*.
+
+The policy is fixed; there is no per-service override, and there is no
+delete or rotate API — a service that needs a new KEK adopts a new service
+name.
+
+## Command-line tool: `hkdfguard-v1-initialize`
+
+Provisions KEKs and wraps DEKs for pipelines. It calls the library only
+through the C ABI above. Two commands:
+
+```
+hkdfguard-v1-initialize provision --service-name|-sn <name>
+
+hkdfguard-v1-initialize wrap --key-file-path|-kf <path> \
+                             --service-name|-sn <name> \
+                             ( --dek-stdin | --dek-file <path> ) \
+                             [--force|-f]
+```
+
+- **`provision`** creates the KEK for `<name>` if it doesn't exist. The only
+  command that creates keys; idempotent (a second run reports "already
+  exists" and exits 0). Prints the keychain mode it used.
+- **`wrap`** wraps the pipeline's existing 32-byte DEK — base64, read from
+  **stdin** (`--dek-stdin`, trailing newline fine) or a **file**
+  (`--dek-file`) — under the already-provisioned KEK and writes the 156-byte
+  payload to `<path>` with POSIX `0640` permissions set at creation. It
+  never creates a KEK (an unprovisioned service is an error naming the
+  `provision` command) and never generates a DEK. There is deliberately no
+  `--dek <base64>` argument: an argv value is visible to every process via
+  `ps` and lands in shell history. `--dek` and `--generate` are refused
+  with an explanation.
+- **`--force`** securely overwrites an existing `<path>` (eight alternating
+  zero/random passes, each `fsync`ed) before replacing it. It only ever
+  touches a **regular file**: a symlink at `<path>` is refused rather than
+  followed (`O_NOFOLLOW` + `fstat`), as is a FIFO, device, or directory.
+
+Exit codes: `0` success, `1` runtime failure, `2` argument error (usage
+printed). Nothing persistent is touched until every argument is validated.
+
+Example pipeline use:
+
+```sh
+hkdfguard-v1-initialize provision -sn com.example.ingest
+printf '%s' "$DEK_B64" | hkdfguard-v1-initialize wrap -kf /etc/example/ingest.key -sn com.example.ingest --dek-stdin
+```
 
 ## Project layout
 
-Three targets, all built from the same `HkdfGuardKeyProtectionEnclave.swift`:
-
-| Target | Product | Use case |
+| Target / package | Product | Purpose |
 |---|---|---|
 | `HkdfGuardKeyProtectionEnclave` | `HkdfGuardKeyProtectionEnclave.framework` | Embed in a signed macOS app; carries the public header and an app-sandbox entitlement |
-| `HkdfGuardKeyProtectionEnclaveDylib` | `hkdfguardkeyprotectionenclave.dylib` | Flat shared library for `dlopen`-based FFI from Python/Go/Node/C#/Java — no entitlements attached, since it's meant to load into arbitrary, often unsandboxed, host processes |
-| `HkdfGuardKeyProtectionEnclaveTests` | `HkdfGuardKeyProtectionEnclaveTests.xctest` | Swift Testing suite exercising the C entry points directly |
+| `HkdfGuardKeyProtectionEnclaveDylib` | `HkdfGuard.Kms.MacOS.v1.dylib` | Flat shared library for `dlopen`-based FFI from arbitrary, often unsandboxed, host processes |
+| `HkdfGuardKeyProtectionEnclaveTests` | `.xctest` | Swift Testing suites for the C entry points and for the CLI as a real subprocess |
+| `hkdfguard-v1-initialize/` | `hkdfguard-v1-initialize` | SwiftPM package for the CLI; links the dylib through its C ABI only |
 
-Requires **Swift 6.2+** and **macOS 13.0+** (enforced at compile time via a
-`#error` guard in the source, and separately at runtime by the deployment
-target).
+All library targets build from the single `HkdfGuardKeyProtectionEnclave.swift`.
+Requires **Swift 6.2+** (compile-time `#error` guard) and **macOS 13.0+**.
 
 ## Building
 
@@ -116,59 +213,94 @@ target).
 xcodebuild -project HkdfGuardKeyProtectionEnclave.xcodeproj \
   -scheme HkdfGuardKeyProtectionEnclave -configuration Release build
 
-# Standalone dylib for cross-language FFI:
+# Standalone dylib for FFI:
 xcodebuild -project HkdfGuardKeyProtectionEnclave.xcodeproj \
-  -scheme HkdfGuardKeyProtectionEnclaveDylib -configuration Release build
+  -target HkdfGuardKeyProtectionEnclaveDylib -configuration Release build
 
-# Tests:
-xcodebuild test -project HkdfGuardKeyProtectionEnclave.xcodeproj \
-  -scheme HkdfGuardKeyProtectionEnclaveTests -destination 'platform=macOS'
+# CLI (links against build/Release by default; override with HKDFGUARD_DYLIB_DIR):
+swift build -c release --package-path hkdfguard-v1-initialize
+
+# Tests (real Secure Enclave required — see Tests):
+xcodebuild test -scheme HkdfGuardKeyProtectionEnclaveTests
 ```
 
-Both the framework and dylib targets use `CODE_SIGN_STYLE = Automatic`.
-The project currently carries a specific `DEVELOPMENT_TEAM` and
-`PRODUCT_BUNDLE_IDENTIFIER` — **replace both with your own Apple Developer
-Team ID and reverse-DNS identifier** before building under your own account
-(Xcode → target → Signing & Capabilities).
+### Distribution: `build-dist.sh`
+
+Builds everything a downstream consumer needs into `dist/osx-x64/` and
+`dist/osx-arm64/` (dylib, header, CLI, `SHA256SUMS`), one folder per .NET
+runtime identifier. For each architecture it builds the dylib and the CLI
+natively, rewrites the CLI's rpath to `@executable_path` so it finds the
+dylib next to itself, signs both with the **hardened runtime and a secure
+timestamp**, then verifies: strict signature check, runtime flag, timestamp,
+`lipo` architecture, rpath, `@rpath` reference, and a `--help` launch smoke
+test on the host architecture. Everything is assembled in a staging
+directory and only moved into `dist/` once every check passes.
+
+```sh
+./build-dist.sh                                   # signs with "Apple Development"
+HKDFGUARD_SIGN_IDENTITY="Developer ID Application: …" ./build-dist.sh
+```
+
+Needs network access (timestamp server). The hardened runtime matters: it
+disables `DYLD_*` environment overrides (which can otherwise redirect which
+dylib a process loads) and enforces library validation, so the CLI only
+loads dylibs signed by the same Team or by Apple.
 
 ## Signing and entitlements
 
-- The **framework** target has `com.apple.security.app-sandbox` enabled.
-  It deliberately does *not* declare a `keychain-access-groups` entitlement:
-  that capability is enforced against a process's main executable, not each
-  framework it loads, and Xcode won't even let it be attached to a Framework
-  target. If cross-process keychain sharing is ever needed, that entitlement
-  belongs on the actual app target that embeds this framework, with the code
-  updated to pass a matching `kSecAttrAccessGroup`.
-- The **dylib** target has no entitlements at all, on purpose, since it's
-  meant to be loaded into arbitrary host processes that may not be
-  sandboxed.
-- Keychain items are looked up as `(service, account: "kek-v1")` generic
-  passwords with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — they never
-  sync via iCloud Keychain and are bound to this device's Secure Enclave.
+- The **framework** target has `com.apple.security.app-sandbox`. It does not
+  declare `keychain-access-groups`: that capability is enforced against a
+  process's main executable, not the frameworks it loads. It belongs on the
+  app that embeds the framework.
+- The **dylib** target has no entitlements, on purpose: it loads into
+  arbitrary host processes.
+- **Data-protection mode** requires the *consuming process* to be a
+  Team-signed app bundle with an embedded provisioning profile carrying
+  `keychain-access-groups` (Xcode: Signing & Capabilities → Keychain
+  Sharing). A bare executable cannot carry that entitlement — AMFI kills it
+  at launch — which is why bare consumers run in legacy mode.
+- The project carries a specific `DEVELOPMENT_TEAM` and bundle identifiers;
+  replace them with your own before building under your account.
 
-## Concurrency notes
+## Concurrency
 
-- `getOrCreateKEK` is safe under concurrent first-use for a given service:
-  if multiple callers race to create the very first keychain item for a
-  service, the keychain's unique index on `(service, account)` lets exactly
-  one creation win, and the losing callers fall back to loading the
-  winner's key rather than failing.
-- That said, the Secure Enclave/`securityd` IPC layer itself has limited
-  real concurrent-request capacity — pushing many *simultaneous* wrap/unwrap
-  calls at it (observed directly while building this project's own test
-  suite) causes severe contention, not just slowness. Avoid firing off large
-  numbers of concurrent Secure Enclave operations from a single process; a
-  handful of concurrent calls is fine, dozens is not.
+- `hkdfguard_create_kek` is safe under concurrent first use: the keychain's
+  unique index on (service, account) lets exactly one creation win and the
+  others load the winner's key.
+- The Secure Enclave / `securityd` IPC layer has limited real concurrency.
+  A handful of simultaneous enclave operations from one process is fine;
+  dozens cause severe contention (observed while building the test suite,
+  which runs serialized for that reason).
 
 ## Tests
 
-The test suite (`HkdfGuardKeyProtectionEnclaveTests.swift`) runs serialized
-(`@Suite(.serialized)`) for the reason above, and covers: round-trip
-correctness, wrapped-output length/format, ephemeral-nonce non-determinism,
-per-service key isolation, input validation (bad DEK length, missing
-service, empty service), output-buffer-too-small size reporting, AES-GCM
-tamper detection, and a regression test for the concurrent-first-use
-provisioning race. Every test that provisions a Secure Enclave key deletes
-its keychain item in a `defer`, so a failing test still leaves the keychain
-clean.
+Two Swift Testing suites, both `.serialized`:
+
+- **`HkdfGuardKeyProtectionEnclaveWrapUnwrapTests`** exercises every C entry
+  point in-process: provisioning, idempotence and the first-use race,
+  service-name rules (ASCII bytes, case-insensitivity, length), round trips,
+  payload length, nonce/ephemeral uniqueness, per-service isolation,
+  fingerprint and ciphertext tamper detection, buffer sizing before any
+  enclave work, NULL-pointer handling, corrupt-item reporting, and the
+  keychain-mode decision (including that data-protection mode from an
+  unentitled process is reported as `-17`, never as "no key").
+- **`HkdfGuardCommandLineToolTests`** builds and runs the real CLI as a
+  subprocess: `provision`/`wrap` semantics, DEK sources, rejected
+  arguments, `--force` symlink/FIFO refusal, file permissions, exit codes.
+
+Both need a real Secure Enclave and are skipped on CI/VM runners. The tests
+that cross the CLI→application keychain boundary (a differently-signed
+process reading an item the CLI created) trigger a one-time interactive
+keychain prompt and are opt-in: set
+`HKDFGUARD_RUN_INTERACTIVE_KEYCHAIN_TESTS=1` and be present to click Allow.
+Every test that provisions a key deletes its keychain item afterward, so a
+run leaves the keychain clean. Exercising data-protection mode end to end
+needs a Team-signed host application with a provisioning profile set as
+the test target's Host Application.
+
+## Differences from the Linux tool
+
+Deliberate divergences from `hkdfguard-v1-initialize.rs`: separate
+`provision` and `wrap` commands; the key file path is `--key-file-path`,
+not positional; no `--dek <base64>` argument (stdin or file only); output
+file permissions `0640`.

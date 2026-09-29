@@ -556,6 +556,52 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         #expect(result.status == -1) // invalidInputLength
     }
 
+    @Test func unwrapRejectsAnyLengthOtherThanTheExactWrappedLength() {
+        // Every payload this library produces is exactly wrappedLength
+        // bytes, so one byte more or less is rejected up front -- before
+        // the service is even looked at (no KEK exists for this service,
+        // yet the answer is -1, not -10).
+        for length in [Self.wrappedLength - 1, Self.wrappedLength + 1, Self.wrappedLength * 2] {
+            let blob = [UInt8](repeating: 0, count: length)
+            let result = Self.unwrap(blob, service: "com.hkdfguard.tests.inexact.length")
+            #expect(result.status == -1, "length \(length)")
+        }
+    }
+
+    @Test func nullPointersAreReportedNotDereferenced() {
+        // A NULL from a C caller is a contract violation, but the library
+        // must report it -- -1 for buffers/lengths, -8 for the service --
+        // rather than crash the host process.
+        var outLen: Int32 = 1024
+        var out = [UInt8](repeating: 0, count: 1024)
+        var exists: Int32 = -1
+        let dek = Self.randomDEK()
+        let blob = [UInt8](repeating: 0, count: Self.wrappedLength)
+
+        #expect(hkdfguard_keychain_mode(outMode: nil) == -1)
+        #expect(hkdfguard_kek_exists(servicePtr: nil, outExists: &exists) == -8)
+        #expect(exists == 0, "outExists must still be written")
+        #expect(hkdfguard_kek_exists(servicePtr: "com.hkdfguard.tests.null", outExists: nil) == -1)
+        #expect(hkdfguard_create_kek(servicePtr: nil) == -8)
+
+        out.withUnsafeMutableBufferPointer { outBuf in
+            dek.withUnsafeBufferPointer { dekBuf in
+                blob.withUnsafeBufferPointer { blobBuf in
+                    #expect(hkdfguard_wrap_dek(servicePtr: nil, dekPtr: dekBuf.baseAddress, dekLen: 32, outPtr: outBuf.baseAddress, outLen: &outLen) == -8)
+                    #expect(hkdfguard_wrap_dek(servicePtr: "com.hkdfguard.tests.null", dekPtr: nil, dekLen: 32, outPtr: outBuf.baseAddress, outLen: &outLen) == -1)
+                    #expect(hkdfguard_wrap_dek(servicePtr: "com.hkdfguard.tests.null", dekPtr: dekBuf.baseAddress, dekLen: 32, outPtr: nil, outLen: &outLen) == -1)
+                    #expect(hkdfguard_wrap_dek(servicePtr: "com.hkdfguard.tests.null", dekPtr: dekBuf.baseAddress, dekLen: 32, outPtr: outBuf.baseAddress, outLen: nil) == -1)
+                    #expect(hkdfguard_generate_and_wrap_dek(servicePtr: nil, outPtr: outBuf.baseAddress, outLen: &outLen) == -8)
+                    #expect(hkdfguard_generate_and_wrap_dek(servicePtr: "com.hkdfguard.tests.null", outPtr: nil, outLen: &outLen) == -1)
+                    #expect(hkdfguard_unwrap_dek(servicePtr: nil, wrappedPtr: blobBuf.baseAddress, wrappedLen: Int32(Self.wrappedLength), outPtr: outBuf.baseAddress, outLen: &outLen) == -8)
+                    #expect(hkdfguard_unwrap_dek(servicePtr: "com.hkdfguard.tests.null", wrappedPtr: nil, wrappedLen: Int32(Self.wrappedLength), outPtr: outBuf.baseAddress, outLen: &outLen) == -1)
+                    #expect(hkdfguard_unwrap_dek(servicePtr: "com.hkdfguard.tests.null", wrappedPtr: blobBuf.baseAddress, wrappedLen: Int32(Self.wrappedLength), outPtr: outBuf.baseAddress, outLen: nil) == -1)
+                }
+            }
+        }
+        #expect(Self.kekExists(service: "com.hkdfguard.tests.null").exists == false, "nothing may have been created")
+    }
+
     // MARK: - Output buffer sizing
 
     @Test func wrapReportsRequiredCapacityWhenBufferTooSmall() {
@@ -577,6 +623,31 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         let result = Self.unwrap(wrapped, service: service, bufferCapacity: 4)
         #expect(result.status == -2) // outputBufferTooSmall
         #expect(result.requiredLen == Int32(Self.dekLength))
+    }
+
+    @Test func bufferSizingIsReportedBeforeAnyKeychainOrEnclaveWork() {
+        // Output sizes are constants, so a too-small buffer must be
+        // reported first -- here, for a service that has no KEK at all, the
+        // answer is outputBufferTooSmall with the required size, not
+        // kekNotFound. A sizing call therefore costs nothing, and unwrap
+        // never decrypts a DEK for a caller who cannot receive it.
+        let service = "com.hkdfguard.tests.sizing.before.kek"
+        // No defer/cleanup needed: nothing is provisioned.
+
+        let wrap = Self.wrap(Self.randomDEK(), service: service, bufferCapacity: 10)
+        #expect(wrap.status == -2)
+        #expect(wrap.requiredLen == Int32(Self.wrappedLength))
+
+        let generate = Self.generateAndWrap(service: service, bufferCapacity: 10)
+        #expect(generate.status == -2)
+        #expect(generate.requiredLen == Int32(Self.wrappedLength))
+
+        let blob = [UInt8](repeating: 0, count: Self.wrappedLength)
+        let unwrap = Self.unwrap(blob, service: service, bufferCapacity: 4)
+        #expect(unwrap.status == -2)
+        #expect(unwrap.requiredLen == Int32(Self.dekLength))
+
+        #expect(Self.kekExists(service: service).exists == false)
     }
 
     // MARK: - Tamper detection
