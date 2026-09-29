@@ -94,6 +94,23 @@ func hkdfguard_kek_exists(_ service: UnsafePointer<CChar>?, _ outExists: UnsafeM
 @_silgen_name("hkdfguard_create_kek")
 func hkdfguard_create_kek(_ service: UnsafePointer<CChar>?) -> Int32
 
+// Which keychain this process's KEK items live in (0 legacy, 1
+// data-protection) -- decided by the library from this executable's own
+// code-signing entitlements. Printed by both commands because a service's
+// provisioner and its consumers must agree on it; see the header.
+@_silgen_name("hkdfguard_keychain_mode")
+func hkdfguard_keychain_mode(_ outMode: UnsafeMutablePointer<Int32>?) -> Int32
+
+func keychainModeName() -> String {
+    var mode: Int32 = -1
+    _ = hkdfguard_keychain_mode(&mode)
+    switch mode {
+    case 0: return "legacy"
+    case 1: return "data-protection"
+    default: return "unknown(\(mode))"
+    }
+}
+
 // Mirrors HKDFGuardStatus in HkdfGuardKeyProtectionEnclave.swift -- kept as
 // a separate, parallel definition rather than importing that module, for
 // the same "go through the C ABI only" reason as the `@_silgen_name`
@@ -719,9 +736,9 @@ func writeWrappedKeyFile(path: String, bytes: [UInt8], force: Bool) throws {
 func runProvision(_ args: ProvisionArgs) throws {
     try validateServiceCharset(args.serviceName)
     if try provisionKEK(service: args.serviceName) {
-        print("provisioned KEK for service \"\(args.serviceName)\"")
+        print("provisioned KEK for service \"\(args.serviceName)\" (keychain: \(keychainModeName()))")
     } else {
-        print("KEK already exists for service \"\(args.serviceName)\"; nothing to do")
+        print("KEK already exists for service \"\(args.serviceName)\" (keychain: \(keychainModeName())); nothing to do")
     }
 }
 
@@ -796,7 +813,7 @@ func runWrap(_ args: WrapArgs) throws {
 
     try writeWrappedKeyFile(path: args.keyFilePath, bytes: wrapped, force: args.force)
 
-    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0640, service \"\(args.serviceName)\")")
+    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0640, service \"\(args.serviceName)\", keychain: \(keychainModeName()))")
 }
 
 // MARK: - Entry point

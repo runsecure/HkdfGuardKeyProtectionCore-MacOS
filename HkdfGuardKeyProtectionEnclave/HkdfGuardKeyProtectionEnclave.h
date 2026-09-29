@@ -84,6 +84,37 @@ FOUNDATION_EXPORT const unsigned char HkdfGuardKeyProtectionEnclaveVersionString
 // `service` is matched case-insensitively -- every function below
 // lowercases it before validation, storage, or lookup, so
 // "Com.Example.App" and "com.example.app" always refer to the same KEK.
+//
+// Keychain mode (hybrid). The KEK's keychain item lives in one of two
+// keychains, chosen once per process from that process's own code-signing
+// entitlements -- never from configuration:
+//
+//   data-protection (mode 1): the process carries a `keychain-access-groups`
+//       entitlement, which on macOS requires a Team-signed app bundle with
+//       an embedded provisioning profile. Items are stored under the FIRST
+//       listed access group, and access is decided by securityd from the
+//       caller's signed identity: no prompts, no per-item ACLs, and any
+//       Team-signed bundle listing the same group shares the item. This is
+//       the hardened mode -- put the shared HkdfGuard group first (or make
+//       it the only one) in every participating bundle's entitlement.
+//   legacy (mode 0): no such entitlement -- a bare executable (the
+//       hkdfguard-v1-initialize CLI as a plain Mach-O, a .NET/Python/Go
+//       host that dlopens this library). Items are stored in the login
+//       keychain, protected by its lock and a per-item ACL keyed to the
+//       creating binary's signature; other identities get an interactive
+//       prompt, or, headless, keychainAccessDenied (-17).
+//
+// The two keychains are disjoint, so the process that provisions a
+// service's KEK and every process that unwraps under it MUST run in the
+// same mode; a mismatch surfaces as kekNotFound (-10). Query the mode with
+// hkdfguard_keychain_mode below and surface it wherever KEKs are
+// provisioned (the CLI prints it).
+
+// Writes 0 (legacy login keychain) or 1 (data-protection keychain) to
+// `*out_mode` -- see "Keychain mode" above. Always succeeds; `*out_mode`
+// is written on every return path.
+int32_t hkdfguard_keychain_mode(
+    int32_t* out_mode);
 
 // Reports whether a Secure Enclave KEK already exists for `service`,
 // without creating one. `*out_exists` is always written on every return

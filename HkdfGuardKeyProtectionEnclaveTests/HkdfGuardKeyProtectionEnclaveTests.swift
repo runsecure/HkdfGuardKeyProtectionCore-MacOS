@@ -347,6 +347,50 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         }
     }
 
+    // MARK: - Keychain mode (hybrid)
+
+    @Test func keychainModeInTheTestHostIsLegacy() {
+        // The xctest agent carries only `com.apple.security.get-task-allow`
+        // -- no `keychain-access-groups` -- so the library must pick the
+        // legacy login keychain here, and that is the mode every other test
+        // in this suite exercises. (Exercising the data-protection mode for
+        // real needs a Team-signed host app with a provisioning profile.)
+        var mode: Int32 = -1
+        #expect(hkdfguard_keychain_mode(outMode: &mode) == 0)
+        #expect(mode == 0)
+        #expect(hkdfguardKeychainMode == .legacy)
+    }
+
+    @Test func dataProtectionModeWithoutEntitlementIsAccessDeniedNotNotFound() {
+        // Drives the internal functions in data-protection mode from this
+        // unentitled process. securityd answers errSecMissingEntitlement
+        // (-34018); the library must report that as keychainAccessDenied
+        // (-17) on every path -- never as "no key" (which would invite
+        // creating one) and never as a generic failure -- and must create
+        // nothing. This is also the proof that kSecUseDataProtectionKeychain
+        // actually reaches the keychain calls: in legacy mode the same
+        // service would simply be created.
+        let service = "com.hkdfguard.tests.dataprotection.unentitled"
+        defer { Self.deleteKEK(service: service) }
+        let dp = KeychainMode.dataProtection(accessGroup: "MFW3T8R8J3.com.hkdfguard.keys")
+
+        // Module-qualified: this suite's own static `kekExists`/`createKEK`
+        // helpers (which go through the C ABI, in the process's real mode)
+        // would otherwise shadow the library's internal functions.
+        let exists = HkdfGuardKeyProtectionEnclave.kekExists(service: service, mode: dp)
+        #expect(exists.status == -17)
+        #expect(exists.exists == false)
+
+        #expect(HkdfGuardKeyProtectionEnclave.createKEK(service: service, mode: dp) == -17)
+
+        let got = HkdfGuardKeyProtectionEnclave.getKEK(service: service, mode: dp)
+        #expect(got.status == -17)
+        #expect(got.key == nil)
+
+        // Nothing leaked into the legacy keychain either.
+        #expect(Self.kekExists(service: service).exists == false)
+    }
+
     @Test func corruptKeychainItemIsReportedAsKekCorruptedNotNotFound() {
         // An item exists under this service, but its data is not a Secure
         // Enclave key representation. Every entry point must report

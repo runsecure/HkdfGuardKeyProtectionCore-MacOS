@@ -24,6 +24,70 @@ private let hkdfguardFingerprintLength = 32
 /// scheme, so it can never be reused as a key for anything else.
 private let hkdfguardSharedInfo = Data("com.hkdfguard.macos.wrap.v1".utf8)
 
+// MARK: - Keychain mode (hybrid)
+
+/// Which keychain the KEK's keychain item lives in. Decided once per
+/// process, from the process's own code-signing entitlements — see
+/// `detectKeychainMode` — never from configuration or the environment.
+///
+/// - `dataProtection`: the process carries a `keychain-access-groups`
+///   entitlement (which on macOS requires a Team-signed app bundle with an
+///   embedded provisioning profile). Items go in the data-protection
+///   keychain under `accessGroup`, where access is decided by securityd
+///   from the caller's signed identity: no ACL prompts, no per-item ACLs,
+///   `kSecAttrAccessible` is honored, and any Team-signed bundle listing
+///   the same group shares the item deterministically. The hardened mode.
+/// - `legacy`: no such entitlement (a bare executable: this CLI as a
+///   plain Mach-O, a .NET/Python/Go host that `dlopen`s this dylib, the
+///   `xctest` agent). Items go in the login keychain, protected by its
+///   lock and a per-item ACL keyed to the creating binary's signature;
+///   other identities hit an interactive prompt, or headless,
+///   `keychainAccessDenied`.
+///
+/// This is not a silent downgrade: an unentitled process cannot see
+/// data-protection items at all, and the mode is derived from a signature
+/// an attacker cannot alter without invalidating it. It does create one
+/// deployment invariant — **the process that provisions a service's KEK and
+/// every process that unwraps under it must run in the same mode** — which
+/// is why `hkdfguard_keychain_mode` exposes the decision and the CLI prints
+/// it.
+enum KeychainMode: Equatable {
+    case legacy
+    case dataProtection(accessGroup: String)
+}
+
+let hkdfguardKeychainMode: KeychainMode = detectKeychainMode()
+
+private func detectKeychainMode() -> KeychainMode {
+    guard let task = SecTaskCreateFromSelf(nil) else {
+        return .legacy
+    }
+    guard let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
+          let groups = value as? [String],
+          let first = groups.first(where: { !$0.isEmpty }) else {
+        return .legacy
+    }
+    return .dataProtection(accessGroup: first)
+}
+
+/// The attributes every keychain query/add for a service's KEK item shares,
+/// including the ones that select the keychain `mode` puts it in.
+private func keychainItemAttributes(service: String, mode: KeychainMode) -> [String: Any] {
+    var attributes: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: hkdfguardKeychainAccount,
+        // Explicit in both modes so a query can never match an iCloud-synced
+        // item, and so the intent is visible rather than a default.
+        kSecAttrSynchronizable as String: false,
+    ]
+    if case .dataProtection(let accessGroup) = mode {
+        attributes[kSecUseDataProtectionKeychain as String] = true
+        attributes[kSecAttrAccessGroup as String] = accessGroup
+    }
+    return attributes
+}
+
 // MARK: - Status codes returned across the C boundary
 
 private enum HKDFGuardStatus: Int32 {
@@ -195,14 +259,10 @@ private enum KEKLookup {
 
 /// Looks up the persisted Secure Enclave key's opaque data representation
 /// in the keychain, under the caller-supplied service identifier.
-private func loadKEKDataRepresentation(service: String) -> KEKLookup {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: hkdfguardKeychainAccount,
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne
-    ]
+private func loadKEKDataRepresentation(service: String, mode: KeychainMode) -> KEKLookup {
+    var query = keychainItemAttributes(service: service, mode: mode)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
 
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -227,14 +287,12 @@ private func reconstructKEK(_ data: Data) -> SecureEnclave.P256.KeyAgreement.Pri
 }
 
 @discardableResult
-private func storeKEKDataRepresentation(_ data: Data, service: String) -> OSStatus {
-    let attributes: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: hkdfguardKeychainAccount,
-        kSecValueData as String: data,
-        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-    ]
+private func storeKEKDataRepresentation(_ data: Data, service: String, mode: KeychainMode) -> OSStatus {
+    var attributes = keychainItemAttributes(service: service, mode: mode)
+    attributes[kSecValueData as String] = data
+    // Honored by the data-protection keychain; accepted but ignored by the
+    // legacy keychain, where the login keychain's own lock applies instead.
+    attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
     return SecItemAdd(attributes as CFDictionary, nil)
 }
 
@@ -243,7 +301,7 @@ private func storeKEKDataRepresentation(_ data: Data, service: String) -> OSStat
 /// `false`) from "a keychain item is present but can't be reconstructed"
 /// (`kekCorrupted`, `false`) — a caller that only looked at the boolean
 /// would otherwise treat a corrupt/foreign entry the same as a clean slate.
-private func kekExists(service: String) -> (status: Int32, exists: Bool) {
+func kekExists(service: String, mode: KeychainMode = hkdfguardKeychainMode) -> (status: Int32, exists: Bool) {
     guard validServiceName(service: service) else {
         return (HKDFGuardStatus.invalidServiceIdentifier.rawValue, false)
     }
@@ -252,7 +310,7 @@ private func kekExists(service: String) -> (status: Int32, exists: Bool) {
         return (HKDFGuardStatus.enclaveUnavailable.rawValue, false)
     }
 
-    switch loadKEKDataRepresentation(service: service) {
+    switch loadKEKDataRepresentation(service: service, mode: mode) {
     case .notFound:
         return (HKDFGuardStatus.success.rawValue, false)
     case .accessDenied:
@@ -271,7 +329,7 @@ private func kekExists(service: String) -> (status: Int32, exists: Bool) {
 /// and safe under concurrent first-use — see the duplicate-item handling
 /// below — so a caller that already checked `kekExists` and got `false`
 /// doesn't need to treat a race against another creator as its own error.
-private func createKEK(service: String) -> Int32 {
+func createKEK(service: String, mode: KeychainMode = hkdfguardKeychainMode) -> Int32 {
 
     // Validate service identifier.
     guard validServiceName(service: service) else {
@@ -287,7 +345,7 @@ private func createKEK(service: String) -> Int32 {
     // a denied or failed lookup means a key may already exist that this
     // process simply can't see, and generating a replacement on top of it
     // would orphan whatever that key protects.
-    switch loadKEKDataRepresentation(service: service) {
+    switch loadKEKDataRepresentation(service: service, mode: mode) {
     case .found(let existing):
         guard reconstructKEK(existing) != nil else {
             // Item exists but cannot be reconstructed.
@@ -318,7 +376,8 @@ private func createKEK(service: String) -> Int32 {
 
     let status = storeKEKDataRepresentation(
         newKey.dataRepresentation,
-        service: service
+        service: service,
+        mode: mode
     )
 
     switch status {
@@ -326,7 +385,7 @@ private func createKEK(service: String) -> Int32 {
     case errSecSuccess:
 
         // Verify store/reload/reconstruct succeeds.
-        switch loadKEKDataRepresentation(service: service) {
+        switch loadKEKDataRepresentation(service: service, mode: mode) {
         case .found(let stored) where reconstructKEK(stored) != nil:
             return HKDFGuardStatus.success.rawValue
         case .accessDenied:
@@ -341,7 +400,7 @@ private func createKEK(service: String) -> Int32 {
         // before declaring success. If the winner was a differently-signed
         // process, its item's ACL may deny this one — that is
         // keychainAccessDenied, not a corrupt item.
-        switch loadKEKDataRepresentation(service: service) {
+        switch loadKEKDataRepresentation(service: service, mode: mode) {
         case .found(let existing):
             guard reconstructKEK(existing) != nil else {
                 return HKDFGuardStatus.kekCorrupted.rawValue
@@ -352,6 +411,12 @@ private func createKEK(service: String) -> Int32 {
         case .notFound, .failed:
             return HKDFGuardStatus.keychainReadFailed.rawValue
         }
+
+    case errSecMissingEntitlement, errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled:
+        // Normally caught by the lookup above; kept so a write that is
+        // refused for access reasons is never reported as a generic write
+        // failure.
+        return HKDFGuardStatus.keychainAccessDenied.rawValue
 
     default:
         return HKDFGuardStatus.keychainWriteFailed.rawValue
@@ -366,7 +431,7 @@ private func createKEK(service: String) -> Int32 {
 /// `hkdfguard_create_kek` has been called), the enclave itself is
 /// unavailable, the service name is malformed, or an existing item is
 /// corrupt, instead of one indistinguishable `keyUnavailable`.
-private func getKEK(service: String) -> (status: Int32, key: SecureEnclave.P256.KeyAgreement.PrivateKey?) {
+func getKEK(service: String, mode: KeychainMode = hkdfguardKeychainMode) -> (status: Int32, key: SecureEnclave.P256.KeyAgreement.PrivateKey?) {
     guard validServiceName(service: service) else {
         return (HKDFGuardStatus.invalidServiceIdentifier.rawValue, nil)
     }
@@ -375,7 +440,7 @@ private func getKEK(service: String) -> (status: Int32, key: SecureEnclave.P256.
         return (HKDFGuardStatus.enclaveUnavailable.rawValue, nil)
     }
 
-    switch loadKEKDataRepresentation(service: service) {
+    switch loadKEKDataRepresentation(service: service, mode: mode) {
     case .notFound:
         return (HKDFGuardStatus.kekNotFound.rawValue, nil)
     case .accessDenied:
@@ -524,6 +589,24 @@ private func wrapDekCore(
     }
     outLen.pointee = Int32(totalLen)
 
+    return HKDFGuardStatus.success.rawValue
+}
+
+/// Reports which keychain this process's KEK items live in — see
+/// `KeychainMode`. `*outMode` is 0 for the legacy login keychain and 1 for
+/// the data-protection keychain, and is written on every return path.
+/// Callers should surface this (the CLI prints it) because a service's
+/// provisioner and its consumers must agree on it.
+@_cdecl("hkdfguard_keychain_mode")
+public func hkdfguard_keychain_mode(
+    outMode: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    switch hkdfguardKeychainMode {
+    case .legacy:
+        outMode.pointee = 0
+    case .dataProtection:
+        outMode.pointee = 1
+    }
     return HKDFGuardStatus.success.rawValue
 }
 
