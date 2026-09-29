@@ -1,11 +1,18 @@
-// CLI tool: ensures a persistent KEK exists for the given service, then
-// wraps a Data Encryption Key (DEK) under it -- either one the library
-// generates on the spot (--generate) or one the caller supplies -- and
-// writes the wrapped payload to a file.
+// CLI tool with two commands:
 //
-// Calls into the HkdfGuard library through its stable C ABI
-// (`hkdfguard_kek_exists`, `hkdfguard_create_kek` if needed, then
-// `hkdfguard_generate_and_wrap_dek` or `hkdfguard_wrap_dek`), the same interface
+//   provision  creates the persistent Secure Enclave KEK for a service if it
+//              does not exist yet. The ONLY command that creates keys.
+//   wrap       wraps a Data Encryption Key (DEK) supplied by the calling
+//              pipeline -- the 32-byte key that pipeline has already
+//              encrypted its data with -- under an already-provisioned KEK,
+//              and writes the wrapped payload to a file. Never creates a
+//              KEK: if none exists for the service, it fails and points at
+//              `provision`. It never generates a DEK either: the key is
+//              always the pipeline's, read from stdin or a file.
+//
+// Calls into the HkdfGuard library through its stable C ABI (`provision`:
+// `hkdfguard_kek_exists`, then `hkdfguard_create_kek`; `wrap`:
+// `hkdfguard_wrap_dek`), the same interface
 // any other-language caller uses -- this tool takes no shortcut through
 // the library's internal Swift types (it doesn't even `import` the
 // library's own Swift module; see Package.swift). Modeled on this project's
@@ -20,27 +27,26 @@
 // `--service-name`; there is no further structure to it.
 //
 // Usage:
-//   hkdfguard-v1-initialize <key-file-path> \
+//   hkdfguard-v1-initialize provision --service-name|-sn <name>
+//
+//   hkdfguard-v1-initialize wrap \
+//       --key-file-path|-kf <key-file-path> \
 //       --service-name|-sn <name> \
-//       ( --generate|-g | --dek-stdin | --dek-file <path> ) \
+//       ( --dek-stdin | --dek-file <path> ) \
 //       [--force|-f]
 //
-// Exactly one DEK source is required:
-//   --generate|-g      the library generates a fresh random 32-byte DEK from
-//                      the OS CSPRNG and wraps it in a single call. No
-//                      plaintext DEK ever exists in this process, on the
-//                      command line, or in any shell history -- the only
-//                      way to obtain it afterward is hkdfguard_unwrap_dek
-//                      under the same service. Recommended.
+// `provision` is idempotent: a second run against the same service reports
+// that the KEK already exists and exits 0.
+//
+// For `wrap`, exactly one DEK source is required:
 //   --dek-stdin        base64 DEK read from standard input (e.g. piped from
-//                      another tool or a secret store; trailing newline ok).
+//                      the pipeline or a secret store; trailing newline ok).
 //   --dek-file <path>  base64 DEK read from a file.
 //
 // There is deliberately no way to pass the DEK itself as a command-line
 // argument: an argv value is visible to every other process on the host
 // (`ps`) for the life of the process and is recorded in the invoking
-// shell's history file. Both stdin and a file avoid that entirely, and
-// --generate never exposes a plaintext DEK anywhere.
+// shell's history file. Both stdin and a file avoid that entirely.
 //
 // The wrapped payload is written to <key-file-path> with POSIX permissions
 // 0640 (owner read/write, group read, no access for anyone else) -- set
@@ -54,9 +60,10 @@
 // redirect the destructive overwrite onto some other file), as is a FIFO,
 // device, or directory.
 //
-// Nothing persistent -- no Secure Enclave key, no keychain item, no file --
-// is created until every argument has been validated, so a malformed
-// invocation never leaves a freshly provisioned KEK behind.
+// `wrap` creates nothing but the output file, and only after every argument
+// has been validated. `provision` creates nothing until its service name
+// has been validated. A malformed invocation of either never leaves a
+// freshly provisioned KEK behind.
 
 import Darwin
 import Foundation
@@ -78,24 +85,14 @@ func hkdfguard_wrap_dek(
     _ outLen: UnsafeMutablePointer<Int32>?
 ) -> Int32
 
-// `hkdfguard_wrap_dek` no longer creates a KEK on first use -- that's now
-// this tool's own responsibility, before wrapping (see `ensureKEK` below),
-// exactly the same as any other caller of the library: ask whether one
+// The library's wrap calls never create a KEK. These two are used only by
+// the `provision` command (see `provisionKEK` below): ask whether one
 // exists, and create it only if the answer is a definite "no".
 @_silgen_name("hkdfguard_kek_exists")
 func hkdfguard_kek_exists(_ service: UnsafePointer<CChar>?, _ outExists: UnsafeMutablePointer<Int32>?) -> Int32
 
 @_silgen_name("hkdfguard_create_kek")
 func hkdfguard_create_kek(_ service: UnsafePointer<CChar>?) -> Int32
-
-// Generates a fresh 32-byte DEK inside the library and wraps it in one call
-// -- the --generate path, where this process never holds a plaintext DEK.
-@_silgen_name("hkdfguard_generate_and_wrap_dek")
-func hkdfguard_generate_and_wrap_dek(
-    _ service: UnsafePointer<CChar>?,
-    _ out: UnsafeMutablePointer<UInt8>?,
-    _ outLen: UnsafeMutablePointer<Int32>?
-) -> Int32
 
 // Mirrors HKDFGuardStatus in HkdfGuardKeyProtectionEnclave.swift -- kept as
 // a separate, parallel definition rather than importing that module, for
@@ -167,45 +164,56 @@ let initialWrappedCapacity = 512
 
 // Where the DEK comes from. Exactly one must be given (see parseArgs).
 enum DekSource {
-    case generate            // --generate|-g
     case stdin               // --dek-stdin
     case file(String)        // --dek-file <path>
 
     var flag: String {
         switch self {
-        case .generate: return "--generate"
         case .stdin: return "--dek-stdin"
         case .file: return "--dek-file"
         }
     }
 }
 
-struct Args {
+struct ProvisionArgs {
+    var serviceName: String
+}
+
+struct WrapArgs {
     var keyFilePath: String
     var serviceName: String
     var dekSource: DekSource
     var force: Bool
 }
 
-enum ParseOutcome {
-    case run(Args)
+enum Command {
+    case provision(ProvisionArgs)
+    case wrap(WrapArgs)
     case help
 }
 
-let dekSourceFlags = "--generate|-g | --dek-stdin | --dek-file <path>"
+let dekSourceFlags = "--dek-stdin | --dek-file <path>"
 
 func printUsage() {
     FileHandle.standardError.write(
         """
-        Usage: \(programName) <key-file-path> --service-name|-sn <name> \\
-                   ( \(dekSourceFlags) ) [--force|-f]
+        Usage:
+          \(programName) provision --service-name|-sn <name>
+          \(programName) wrap --key-file-path|-kf <path> --service-name|-sn <name> \\
+                                    ( \(dekSourceFlags) ) [--force|-f]
 
-          --generate|-g       generate a fresh random 32-byte DEK inside the library and
-                              wrap it; no plaintext DEK ever exists in this process, on
-                              the command line, or in shell history (recommended)
+        Commands:
+          provision   create the Secure Enclave KEK for <name> if it does not exist yet.
+                      The only command that creates keys; safe to run repeatedly.
+          wrap        wrap the pipeline's 32-byte DEK under the already-provisioned KEK
+                      for <name> and write the wrapped payload to <path>. Never creates
+                      a KEK -- fails if none exists for <name> (run provision first).
+
+        wrap options (exactly one DEK source is required):
+          --key-file-path|-kf <path>  where to write the wrapped payload
           --dek-stdin         read the base64 DEK from standard input
           --dek-file <path>   read the base64 DEK from a file
-          --force|-f          securely overwrite an existing <key-file-path>
+          --force|-f          securely overwrite an existing <path>
 
         The DEK is never accepted as a command-line argument (it would be visible
         to other processes via ps and recorded in shell history).
@@ -214,29 +222,79 @@ func printUsage() {
     )
 }
 
-func parseArgs(_ arguments: [String]) throws -> ParseOutcome {
+// `--service-name|-sn <name>`, shared by both commands' parsers.
+func parseServiceName(_ arg: String, _ iterator: inout IndexingIterator<[String]>) throws -> String {
+    guard let value = iterator.next() else {
+        throw CLIError("\(arg) requires a value")
+    }
+    guard !value.isEmpty else {
+        throw CLIError("--service-name must not be empty")
+    }
+    return value
+}
+
+func parseArgs(_ arguments: [String]) throws -> Command {
+    var rest = Array(arguments.dropFirst()) // skip argv[0]
+    guard !rest.isEmpty else {
+        throw CLIError("missing command: expected provision or wrap")
+    }
+    let command = rest.removeFirst()
+    switch command {
+    case "--help", "-h":
+        return .help
+    case "provision":
+        return try parseProvision(rest)
+    case "wrap":
+        return try parseWrap(rest)
+    default:
+        throw CLIError("unknown command \"\(command)\": expected provision or wrap")
+    }
+}
+
+func parseProvision(_ arguments: [String]) throws -> Command {
+    var serviceName: String?
+
+    var iterator = arguments.makeIterator()
+    while let arg = iterator.next() {
+        switch arg {
+        case "--help", "-h":
+            return .help
+        case "--service-name", "-sn":
+            serviceName = try parseServiceName(arg, &iterator)
+        default:
+            throw CLIError("provision: unrecognized argument: \(arg)")
+        }
+    }
+
+    guard let serviceName else { throw CLIError("provision: missing required --service-name|-sn") }
+    return .provision(ProvisionArgs(serviceName: serviceName))
+}
+
+func parseWrap(_ arguments: [String]) throws -> Command {
     var keyFilePath: String?
     var serviceName: String?
     var dekSources: [DekSource] = []
     var force = false
 
-    var iterator = arguments.dropFirst().makeIterator() // skip argv[0]
+    var iterator = arguments.makeIterator()
     while let arg = iterator.next() {
         switch arg {
         case "--help", "-h":
             return .help
         case "--force", "-f":
             force = true
+        case "--key-file-path", "-kf":
+            guard let value = iterator.next(), !value.isEmpty else {
+                throw CLIError("\(arg) requires a path")
+            }
+            keyFilePath = value
         case "--service-name", "-sn":
-            guard let value = iterator.next() else {
-                throw CLIError("\(arg) requires a value")
-            }
-            guard !value.isEmpty else {
-                throw CLIError("--service-name must not be empty")
-            }
-            serviceName = value
+            serviceName = try parseServiceName(arg, &iterator)
         case "--generate", "-g":
-            dekSources.append(.generate)
+            // This tool only wraps a DEK the calling pipeline already has --
+            // the key its data was encrypted with. Generating one here
+            // would produce a key nothing has used.
+            throw CLIError("\(arg) is not supported: this tool wraps the pipeline's existing DEK; supply it with \(dekSourceFlags)")
         case "--dek-stdin":
             dekSources.append(.stdin)
         case "--dek-file":
@@ -251,25 +309,26 @@ func parseArgs(_ arguments: [String]) throws -> ParseOutcome {
             // here and what to use instead.
             throw CLIError("\(arg) is not supported: a DEK on the command line is visible via ps and recorded in shell history; use \(dekSourceFlags)")
         default:
-            if keyFilePath == nil, !arg.hasPrefix("-") {
-                keyFilePath = arg
-            } else {
-                throw CLIError("unrecognized argument: \(arg)")
+            if !arg.hasPrefix("-") {
+                // The key file path used to be positional; say so rather
+                // than leaving the caller to guess what went wrong.
+                throw CLIError("wrap: unexpected argument \"\(arg)\" -- the key file path is given with --key-file-path|-kf <path>")
             }
+            throw CLIError("wrap: unrecognized argument: \(arg)")
         }
     }
 
-    guard let keyFilePath else { throw CLIError("missing required <key-file-path>") }
-    guard let serviceName else { throw CLIError("missing required --service-name|-sn") }
+    guard let keyFilePath else { throw CLIError("wrap: missing required --key-file-path|-kf") }
+    guard let serviceName else { throw CLIError("wrap: missing required --service-name|-sn") }
     guard !dekSources.isEmpty else {
-        throw CLIError("missing required DEK source: one of \(dekSourceFlags)")
+        throw CLIError("wrap: missing required DEK source: one of \(dekSourceFlags)")
     }
     guard dekSources.count == 1 else {
-        throw CLIError("conflicting DEK sources (\(dekSources.map(\.flag).joined(separator: ", "))): give exactly one of \(dekSourceFlags)")
+        throw CLIError("wrap: conflicting DEK sources (\(dekSources.map(\.flag).joined(separator: ", "))): give exactly one of \(dekSourceFlags)")
     }
 
-    return .run(
-        Args(
+    return .wrap(
+        WrapArgs(
             keyFilePath: keyFilePath,
             serviceName: serviceName,
             dekSource: dekSources[0],
@@ -309,28 +368,33 @@ func validateServiceCharset(_ service: String) throws {
     }
 }
 
-// MARK: - KEK provisioning
+// MARK: - KEK provisioning (the `provision` command only)
 
-// Makes sure a KEK exists for `service` before anything is wrapped under
-// it: hkdfguard_kek_exists first, hkdfguard_create_kek only on a definite
-// "no key yet". Anything other than a clean yes/no from the exists check --
-// keychainAccessDenied, keychainReadFailed, kekCorrupted, enclaveUnavailable
-// -- stops here with that specific reason, rather than falling through to
-// a create attempt whose failure would be reported against the wrong step.
-func ensureKEK(service: String) throws {
+// Creates the KEK for `service` if none exists; returns true if one was
+// created, false if one already existed. hkdfguard_kek_exists first,
+// hkdfguard_create_kek only on a definite "no key yet". Anything other than
+// a clean yes/no from the exists check -- keychainAccessDenied,
+// keychainReadFailed, kekCorrupted, enclaveUnavailable -- stops here with
+// that specific reason, rather than falling through to a create attempt
+// whose failure would be reported against the wrong step.
+//
+// This is the only place in the tool that calls either function: `wrap`
+// never checks for or creates a KEK.
+func provisionKEK(service: String) throws -> Bool {
     var exists: Int32 = 0
     let existsStatus = service.withCString { hkdfguard_kek_exists($0, &exists) }
     guard existsStatus == HKDFGuardStatus.success.rawValue else {
         throw CLIError("hkdfguard_kek_exists failed: \(describeStatus(existsStatus))")
     }
     if exists != 0 {
-        return
+        return false
     }
 
     let createStatus = service.withCString { hkdfguard_create_kek($0) }
     guard createStatus == HKDFGuardStatus.success.rawValue else {
         throw CLIError("hkdfguard_create_kek failed: \(describeStatus(createStatus))")
     }
+    return true
 }
 
 // MARK: - Wrap
@@ -338,10 +402,10 @@ func ensureKEK(service: String) throws {
 // Calls `attempt` with an output buffer of initialWrappedCapacity and, if
 // the library answers outputBufferTooSmall (having written the size it
 // actually needs into the length out-parameter), retries exactly once at
-// that size -- same pattern as the Linux tool's `wrap_dek`. Shared by both
-// wrap entry points below so there is one retry implementation.
+// that size -- same pattern as the Linux tool's `wrap_dek`.
 func callWithWrappedBuffer(
     _ functionName: String,
+    service: String,
     _ attempt: (UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<Int32>?) -> Int32
 ) throws -> [UInt8] {
     var wrapped = [UInt8](repeating: 0, count: initialWrappedCapacity)
@@ -358,6 +422,10 @@ func callWithWrappedBuffer(
     }
 
     guard rc == HKDFGuardStatus.success.rawValue else {
+        if rc == HKDFGuardStatus.kekNotFound.rawValue {
+            // `wrap` never provisions; point at the command that does.
+            throw CLIError("no KEK exists for service \"\(service)\"; run `\(programName) provision --service-name \(service)` first")
+        }
         throw CLIError("\(functionName) failed: \(describeStatus(rc))")
     }
 
@@ -370,7 +438,7 @@ func callWithWrappedBuffer(
 // converting to `[UInt8]` first would leave a second, unzeroed copy sitting
 // in memory for the rest of the process's life.
 func wrapDek(service: String, dek: Data) throws -> [UInt8] {
-    try callWithWrappedBuffer("hkdfguard_wrap_dek") { outPtr, outLen in
+    try callWithWrappedBuffer("hkdfguard_wrap_dek", service: service) { outPtr, outLen in
         service.withCString { servicePtr in
             dek.withUnsafeBytes { dekBuf in
                 hkdfguard_wrap_dek(
@@ -385,26 +453,11 @@ func wrapDek(service: String, dek: Data) throws -> [UInt8] {
     }
 }
 
-// The --generate path: the library sources the DEK from the OS CSPRNG,
-// wraps it, and zeroes its own copy before returning -- this process only
-// ever sees the wrapped form.
-func generateAndWrapDek(service: String) throws -> [UInt8] {
-    try callWithWrappedBuffer("hkdfguard_generate_and_wrap_dek") { outPtr, outLen in
-        service.withCString { servicePtr in
-            hkdfguard_generate_and_wrap_dek(servicePtr, outPtr, outLen)
-        }
-    }
-}
+// MARK: - Reading the pipeline's DEK
 
-// MARK: - Reading a caller-supplied DEK
-
-// Returns the base64 text for a caller-supplied DEK source. Never called
-// for .generate, which has no text to read.
+// Returns the base64 text for a DEK source.
 func readSuppliedDekBase64(_ source: DekSource) throws -> String {
     switch source {
-    case .generate:
-        preconditionFailure("--generate has no DEK text to read")
-
     case .stdin:
         let data = FileHandle.standardInput.readDataToEndOfFile()
         guard let text = String(data: data, encoding: .utf8) else {
@@ -663,7 +716,16 @@ func writeWrappedKeyFile(path: String, bytes: [UInt8], force: Bool) throws {
 
 // MARK: - Run
 
-func run(_ args: Args) throws {
+func runProvision(_ args: ProvisionArgs) throws {
+    try validateServiceCharset(args.serviceName)
+    if try provisionKEK(service: args.serviceName) {
+        print("provisioned KEK for service \"\(args.serviceName)\"")
+    } else {
+        print("KEK already exists for service \"\(args.serviceName)\"; nothing to do")
+    }
+}
+
+func runWrap(_ args: WrapArgs) throws {
     // Fast, friendly pre-check: fail before ever touching the Secure
     // Enclave/Keychain if the output path obviously already exists,
     // rather than making the caller pay for a full wrap operation just to
@@ -683,68 +745,53 @@ func run(_ args: Args) throws {
 
     // `args.serviceName` is not secret -- it's a logical identifier, not key
     // material -- so no special scoping is needed for it. Validated before
-    // any DEK is read or generated.
+    // any DEK is read.
     try validateServiceCharset(args.serviceName)
 
+    // `wrap` never checks for or creates a KEK -- hkdfguard_kek_exists and
+    // hkdfguard_create_kek belong to the `provision` command alone. With no
+    // KEK for this service hkdfguard_wrap_dek fails with kekNotFound before
+    // touching anything, which callWithWrappedBuffer reports as "run
+    // provision first".
     let wrapped: [UInt8]
-    switch args.dekSource {
-    case .generate:
-        // Nothing persistent is touched until every argument has been
-        // validated -- which, with no DEK to validate, is now.
-        // hkdfguard_wrap_dek/hkdfguard_generate_and_wrap_dek no longer
-        // create a KEK on first use, so this tool checks for one and creates
-        // it only if missing. This process never holds the plaintext DEK.
-        try ensureKEK(service: args.serviceName)
-        wrapped = try generateAndWrapDek(service: args.serviceName)
-
-    case .stdin, .file:
-        do {
-            var base64Text = try readSuppliedDekBase64(args.dekSource)
-            guard var dekData = Data(base64Encoded: base64Text) else {
-                throw CLIError("\(args.dekSource.flag): the DEK is not valid base64")
-            }
-
-            // The base64 *text* has now served its only purpose: drop this
-            // process's owned reference to it right here. Unlike the decoded
-            // DEK *bytes* below, Swift's String has no supported API for
-            // in-place zeroing -- reassigning to an empty literal drops the
-            // only strong reference so the buffer becomes eligible for
-            // deallocation at the earliest opportunity, which is the best
-            // this language allows, not a guaranteed wipe the way
-            // SecureZeroMemory/Zeroizing are on this project's Windows/Linux
-            // tools.
-            base64Text = ""
-
-            // Scrub our local copy of the decoded DEK bytes the instant this
-            // block ends, on every exit path -- immediately after wrapDek is
-            // done with it, not at the end of run() (which would otherwise
-            // leave it sitting in memory, unused but unwiped, through the
-            // potentially-slow 8-pass secure-overwrite and the final file
-            // write below).
-            defer {
-                _ = dekData.withUnsafeMutableBytes { raw in
-                    raw.initializeMemory(as: UInt8.self, repeating: 0)
-                }
-            }
-
-            guard dekData.count == dekLen else {
-                throw CLIError("\(args.dekSource.flag): the DEK must decode to exactly \(dekLen) bytes, got \(dekData.count)")
-            }
-
-            // Only now -- every argument validated -- is anything persistent
-            // touched. Deliberately after the DEK checks above: a malformed
-            // DEK must never leave a freshly provisioned Secure Enclave key
-            // and keychain item behind for a command that then fails. The
-            // decoded DEK lives a few milliseconds longer for it, still
-            // zeroed by the defer above the instant this block ends.
-            try ensureKEK(service: args.serviceName)
-
-            wrapped = try wrapDek(service: args.serviceName, dek: dekData)
-            // the `defer` above zeroes `dekData` here, as this scope ends --
-            // immediately after wrapDek returns the wrapped (encrypted, no
-            // longer secret) form, which is the only thing that survives
-            // past this point.
+    do {
+        var base64Text = try readSuppliedDekBase64(args.dekSource)
+        guard var dekData = Data(base64Encoded: base64Text) else {
+            throw CLIError("\(args.dekSource.flag): the DEK is not valid base64")
         }
+
+        // The base64 *text* has now served its only purpose: drop this
+        // process's owned reference to it right here. Unlike the decoded
+        // DEK *bytes* below, Swift's String has no supported API for
+        // in-place zeroing -- reassigning to an empty literal drops the
+        // only strong reference so the buffer becomes eligible for
+        // deallocation at the earliest opportunity, which is the best
+        // this language allows, not a guaranteed wipe the way
+        // SecureZeroMemory/Zeroizing are on this project's Windows/Linux
+        // tools.
+        base64Text = ""
+
+        // Scrub our local copy of the decoded DEK bytes the instant this
+        // block ends, on every exit path -- immediately after wrapDek is
+        // done with it, not at the end of runWrap() (which would otherwise
+        // leave it sitting in memory, unused but unwiped, through the
+        // potentially-slow 8-pass secure-overwrite and the final file
+        // write below).
+        defer {
+            _ = dekData.withUnsafeMutableBytes { raw in
+                raw.initializeMemory(as: UInt8.self, repeating: 0)
+            }
+        }
+
+        guard dekData.count == dekLen else {
+            throw CLIError("\(args.dekSource.flag): the DEK must decode to exactly \(dekLen) bytes, got \(dekData.count)")
+        }
+
+        wrapped = try wrapDek(service: args.serviceName, dek: dekData)
+        // the `defer` above zeroes `dekData` here, as this scope ends --
+        // immediately after wrapDek returns the wrapped (encrypted, no
+        // longer secret) form, which is the only thing that survives
+        // past this point.
     }
 
     try writeWrappedKeyFile(path: args.keyFilePath, bytes: wrapped, force: args.force)
@@ -754,24 +801,31 @@ func run(_ args: Args) throws {
 
 // MARK: - Entry point
 
+// Runs a command body; a runtime failure prints the error and exits 1 --
+// distinct from an argument-parsing failure (exit 2) below, matching the
+// Linux tool's own exit-code convention.
+func runOrExit(_ body: () throws -> Void) -> Never {
+    do {
+        try body()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+}
+
 do {
     switch try parseArgs(CommandLine.arguments) {
     case .help:
         printUsage()
         exit(0)
-    case .run(let args):
-        do {
-            try run(args)
-            exit(0)
-        } catch {
-            FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
-            exit(1)
-        }
+    case .provision(let args):
+        runOrExit { try runProvision(args) }
+    case .wrap(let args):
+        runOrExit { try runWrap(args) }
     }
 } catch {
-    // An argument-parsing failure: print the error and usage, then exit 2
-    // -- distinct from a runtime failure (exit 1) inside `run`, matching
-    // the Linux tool's own exit-code convention.
+    // An argument-parsing failure: print the error and usage, then exit 2.
     FileHandle.standardError.write("error: \(error)\n".data(using: .utf8)!)
     printUsage()
     exit(2)
