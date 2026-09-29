@@ -11,6 +11,9 @@ build/
 dist/
 build-arm64/
 build-x64/
+build-x86_64/
+## Per-architecture SwiftPM scratch directories used by build-dist.sh
+hkdfguard-v1-initialize/.build-*/
 
 ## User settings
 xcuserdata/

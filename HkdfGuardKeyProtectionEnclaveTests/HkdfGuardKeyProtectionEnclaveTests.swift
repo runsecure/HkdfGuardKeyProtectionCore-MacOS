@@ -23,7 +23,8 @@ import Security
 ///   -8 = invalidServiceIdentifier, -9 = enclaveUnavailable,
 ///   -10 = kekNotFound, -11 = kekCorrupted, -12 = accessControlCreationFailed,
 ///   -13 = keyGenerationFailed, -14 = keychainWriteFailed,
-///   -15 = kekVerificationFailed, -16 = fingerprintMismatch.
+///   -15 = kekVerificationFailed, -16 = fingerprintMismatch,
+///   -17 = keychainAccessDenied, -18 = keychainReadFailed.
 ///
 /// Important behavior change worth calling out here, not just in the
 /// individual tests below: `hkdfguard_wrap_dek`/`hkdfguard_unwrap_dek`/
@@ -85,9 +86,13 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
     /// never be reconstructed again) once the keychain item that stores
     /// that representation is gone, which is the actual cleanup unit here.
     private static func deleteKEK(service: String) {
+        // The library lowercases `service` before storing (see
+        // `normalizedService`), and legacy-keychain service matching is
+        // case-sensitive — deleting with the caller's original spelling
+        // (`appA`, an uppercase UUID) silently misses and leaks the item.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service.lowercased(),
             kSecAttrAccount as String: hkdfguardKeychainAccount
         ]
         SecItemDelete(query as CFDictionary)
@@ -301,6 +306,77 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         // hyphen (still a very ordinary character in a reverse-DNS-style
         // identifier) must not slip through.
         #expect(Self.createKEK(service: "com.hkdfguard.tests-invalid-charset") == -8) // invalidServiceIdentifier
+    }
+
+    @Test func serviceNameIsCaseInsensitive() {
+        // The library lowercases before every keychain/crypto use, so the
+        // same KEK must be reached however the caller capitalizes.
+        let mixed = "Com.HkdfGuard.Tests.Case.Insensitive"
+        let lower = mixed.lowercased()
+        defer { Self.deleteKEK(service: lower) }
+
+        #expect(Self.createKEK(service: mixed) == 0)
+        #expect(Self.kekExists(service: lower).exists == true)
+
+        let wrapped = Self.wrap(Self.randomDEK(), service: mixed)
+        #expect(wrapped.status == 0)
+        #expect(Self.unwrap(wrapped.wrapped, service: lower).status == 0)
+        #expect(Self.unwrap(wrapped.wrapped, service: mixed.uppercased()).status == 0)
+    }
+
+    @Test func serviceNameRejectsNonASCII() {
+        // Character.isLetter/isNumber would accept every one of these; the
+        // contract (header, CLI, Linux tool) is ASCII bytes only. The
+        // KELVIN SIGN case matters most: Unicode-lowercased it becomes a
+        // plain ASCII 'k', so validating *after* lowercasing would let it
+        // through as a different spelling of an ASCII name.
+        let rejected = [
+            "caf\u{00E9}",                        // é
+            "\u{65E5}\u{672C}",                   // 日本
+            "com.hkdfguard.\u{0663}",             // Arabic-Indic digit three
+            "com.hkdfguard.tests.\u{00BD}",       // ½
+            "\u{212A}",                           // KELVIN SIGN
+            "com.hkdfguard.tests.\u{0130}",       // İ (lowercases to i + U+0307)
+        ]
+        for name in rejected {
+            #expect(Self.createKEK(service: name) == -8, "\(name.unicodeScalars.map { String($0.value, radix: 16) }) must be rejected")
+            #expect(Self.kekExists(service: name).status == -8)
+            #expect(Self.wrap(Self.randomDEK(), service: name).status == -8)
+            #expect(Self.generateAndWrap(service: name).status == -8)
+            #expect(Self.unwrap([UInt8](repeating: 0, count: Self.wrappedLength), service: name).status == -8)
+        }
+    }
+
+    @Test func corruptKeychainItemIsReportedAsKekCorruptedNotNotFound() {
+        // An item exists under this service, but its data is not a Secure
+        // Enclave key representation. Every entry point must report
+        // kekCorrupted (-11): not "no key" (which would invite creating a
+        // replacement on top of it), not success, and nothing may "heal"
+        // it by replacing it. This is the case the keychain-lookup mapping
+        // has to keep distinct from keychainAccessDenied (-17), which is
+        // not reproducible in-process without locking the login keychain.
+        let service = "com.hkdfguard.tests.kek.corrupt.item"
+        defer { Self.deleteKEK(service: service) }
+
+        let garbage = Data((0..<48).map { UInt8($0) })
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: hkdfguardKeychainAccount,
+            kSecValueData as String: garbage
+        ]
+        #expect(SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess)
+
+        let exists = Self.kekExists(service: service)
+        #expect(exists.status == -11) // kekCorrupted
+        #expect(exists.exists == false)
+        #expect(Self.createKEK(service: service) == -11)
+        #expect(Self.wrap(Self.randomDEK(), service: service).status == -11)
+        #expect(Self.unwrap([UInt8](repeating: 0, count: Self.wrappedLength), service: service).status == -11)
+
+        // Still corrupt, still present: createKEK above must not have
+        // replaced it.
+        #expect(Self.kekExists(service: service).status == -11)
     }
 
     // MARK: - wrap/unwrap require an already-created KEK

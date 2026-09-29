@@ -99,6 +99,23 @@ private enum HKDFGuardStatus: Int32 {
     /// derived from one: unlike `decryptionFailed`, this specifically
     /// means "wrong KEK," not "right KEK, but tampered/mismatched data."
     case fingerprintMismatch = -16
+
+    /// The keychain refused to say whether an item exists for this
+    /// service: the keychain is locked or there is no UI session to
+    /// prompt in (`errSecInteractionNotAllowed` — the headless-daemon
+    /// case), the item's ACL denied this process or the user declined the
+    /// access prompt (`errSecAuthFailed`, `errSecUserCanceled`), or this
+    /// process lacks a required entitlement (`errSecMissingEntitlement`).
+    /// Deliberately distinct from `kekNotFound`/`kekCorrupted`: a key very
+    /// likely *does* exist, and treating this as "no key" or "corrupt key"
+    /// would invite a caller to create a replacement or an operator to
+    /// delete a healthy one.
+    case keychainAccessDenied = -17
+
+    /// `SecItemCopyMatching` failed with an `OSStatus` other than
+    /// not-found or one of the access-denial codes above — e.g. no
+    /// keychain available at all, or an unexpected item shape.
+    case keychainReadFailed = -18
 }
 
 // MARK: - Secure Enclave KEK lookup / provisioning
@@ -115,45 +132,70 @@ private func makeAccessControl() -> SecAccessControl? {
     )
 }
 
-/// Every C ABI entry point below calls this immediately after converting
-/// the raw C string, before validation or any keychain/crypto use —
-/// service names are case-insensitive (`"Com.Example.App"` and
-/// `"com.example.app"` must resolve to the same KEK), so lowercasing here,
-/// once, up front, is what makes that true everywhere downstream:
-/// `validServiceName`, the keychain query/store calls, and the
-/// AES-GCM/HKDF `service` bytes all only ever see this normalized form.
-/// Lowercasing is charset-safe for this purpose — `validServiceName`
-/// only accepts ASCII letters, digits, and '.', none of which change
-/// length or collide with one another under ASCII case-folding.
-private func normalizedService(from servicePtr: UnsafePointer<CChar>) -> String {
-    String(cString: servicePtr).lowercased()
-}
+/// Maximum accepted length of a service name, in UTF-8 bytes (which, for
+/// the ASCII-only charset below, is also its character count).
+private let hkdfguardMaxServiceLength = 128
 
-private func isValidServiceChar(c: Character) -> Bool {
-    return c.isLetter || c.isNumber || c == "."
+/// ASCII letters, digits, and '.' — nothing else. Checked on raw UTF-8
+/// bytes rather than `Character` properties on purpose: `Character.isLetter`
+/// / `isNumber` are Unicode-aware and would accept `é`, CJK, Arabic-Indic
+/// digits, `½`, and so on, while `String.count` counts grapheme clusters
+/// rather than bytes. The C header, the CLI, and this project's Linux
+/// tool all promise (and enforce) ASCII bytes, so this must too.
+private func isValidServiceByte(_ byte: UInt8) -> Bool {
+    (0x30...0x39).contains(byte)      // '0'-'9'
+        || (0x41...0x5A).contains(byte) // 'A'-'Z'
+        || (0x61...0x7A).contains(byte) // 'a'-'z'
+        || byte == 0x2E                 // '.'
 }
 
 private func validServiceName(service: String) -> Bool {
-    guard !service.isEmpty else {
+    let bytes = service.utf8
+    guard !bytes.isEmpty, bytes.count <= hkdfguardMaxServiceLength else {
         return false
     }
-    
-    guard service.count <= 128 else {
-        return false
+    return bytes.allSatisfy(isValidServiceByte)
+}
+
+/// Every C ABI entry point below calls this immediately after receiving
+/// the raw C string, before any keychain/crypto use. It validates first
+/// and lowercases second — in that order, because Unicode case-folding
+/// can change byte length and map non-ASCII input onto ASCII (KELVIN SIGN
+/// U+212A lowercases to plain `k`), so lowercasing before validation
+/// would let such input through. After `validServiceName` has confirmed
+/// pure ASCII, an ASCII-only lowercase is exact and length-preserving.
+///
+/// Service names are case-insensitive (`"Com.Example.App"` and
+/// `"com.example.app"` resolve to the same KEK); the returned string is
+/// the one normalized form that `validServiceName` re-checks downstream,
+/// the keychain query/store calls use, and the AES-GCM AAD / HKDF info
+/// bytes are built from. Returns `nil` when the name is invalid — the
+/// caller maps that to `invalidServiceIdentifier`.
+private func normalizedService(from servicePtr: UnsafePointer<CChar>) -> String? {
+    let raw = String(cString: servicePtr)
+    guard validServiceName(service: raw) else { return nil }
+    let lowered = raw.utf8.map { byte in
+        (0x41...0x5A).contains(byte) ? byte + 0x20 : byte
     }
-    
-    for c in service {
-        if !isValidServiceChar(c: c) {
-            return false
-        }
-    }
-    
-    return true
+    return String(decoding: lowered, as: UTF8.self)
+}
+
+/// Outcome of looking up a service's keychain item. `notFound` is the only
+/// case that means "no key exists"; the other two failure cases mean the
+/// keychain would not or could not answer, and a key may well exist — the
+/// callers below must never treat those as a clean slate.
+private enum KEKLookup {
+    case found(Data)
+    case notFound
+    /// Locked keychain / no UI session, ACL denial, user declined the
+    /// prompt, or missing entitlement — see `HKDFGuardStatus.keychainAccessDenied`.
+    case accessDenied
+    case failed(OSStatus)
 }
 
 /// Looks up the persisted Secure Enclave key's opaque data representation
 /// in the keychain, under the caller-supplied service identifier.
-private func loadKEKDataRepresentation(service: String) -> Data? {
+private func loadKEKDataRepresentation(service: String) -> KEKLookup {
     let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service,
@@ -164,8 +206,24 @@ private func loadKEKDataRepresentation(service: String) -> Data? {
 
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
-    guard status == errSecSuccess, let data = item as? Data else { return nil }
-    return data
+    switch status {
+    case errSecSuccess:
+        guard let data = item as? Data else { return .failed(errSecInternalError) }
+        return .found(data)
+    case errSecItemNotFound:
+        return .notFound
+    case errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled, errSecMissingEntitlement:
+        return .accessDenied
+    default:
+        return .failed(status)
+    }
+}
+
+/// Reconstructs a Secure Enclave key from a keychain item's stored data.
+/// `nil` means the item is present but is not (or is no longer) a usable
+/// key for this device — `HKDFGuardStatus.kekCorrupted`.
+private func reconstructKEK(_ data: Data) -> SecureEnclave.P256.KeyAgreement.PrivateKey? {
+    try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: data)
 }
 
 @discardableResult
@@ -194,15 +252,19 @@ private func kekExists(service: String) -> (status: Int32, exists: Bool) {
         return (HKDFGuardStatus.enclaveUnavailable.rawValue, false)
     }
 
-    guard let existing = loadKEKDataRepresentation(service: service) else {
+    switch loadKEKDataRepresentation(service: service) {
+    case .notFound:
         return (HKDFGuardStatus.success.rawValue, false)
+    case .accessDenied:
+        return (HKDFGuardStatus.keychainAccessDenied.rawValue, false)
+    case .failed:
+        return (HKDFGuardStatus.keychainReadFailed.rawValue, false)
+    case .found(let existing):
+        guard reconstructKEK(existing) != nil else {
+            return (HKDFGuardStatus.kekCorrupted.rawValue, false)
+        }
+        return (HKDFGuardStatus.success.rawValue, true)
     }
-
-    guard let _ = try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: existing) else {
-        return (HKDFGuardStatus.kekCorrupted.rawValue, false)
-    }
-
-    return (HKDFGuardStatus.success.rawValue, true)
 }
 
 /// Creates a KEK for `service` if one doesn't already exist. Idempotent
@@ -221,20 +283,24 @@ private func createKEK(service: String) -> Int32 {
         return HKDFGuardStatus.enclaveUnavailable.rawValue
     }
 
-    // Existing key?
-    if let existing = loadKEKDataRepresentation(service: service) {
-
-        guard let _ =
-            try? SecureEnclave.P256.KeyAgreement.PrivateKey(
-                dataRepresentation: existing
-            )
-        else {
+    // Existing key? Only a definite "not found" may proceed to create one:
+    // a denied or failed lookup means a key may already exist that this
+    // process simply can't see, and generating a replacement on top of it
+    // would orphan whatever that key protects.
+    switch loadKEKDataRepresentation(service: service) {
+    case .found(let existing):
+        guard reconstructKEK(existing) != nil else {
             // Item exists but cannot be reconstructed.
             // Do NOT generate a replacement key.
             return HKDFGuardStatus.kekCorrupted.rawValue
         }
-
         return HKDFGuardStatus.success.rawValue
+    case .accessDenied:
+        return HKDFGuardStatus.keychainAccessDenied.rawValue
+    case .failed:
+        return HKDFGuardStatus.keychainReadFailed.rawValue
+    case .notFound:
+        break
     }
 
     // No key exists. Create one.
@@ -260,35 +326,32 @@ private func createKEK(service: String) -> Int32 {
     case errSecSuccess:
 
         // Verify store/reload/reconstruct succeeds.
-        guard
-            let stored =
-                loadKEKDataRepresentation(service: service),
-            let _ =
-                try? SecureEnclave.P256.KeyAgreement.PrivateKey(
-                    dataRepresentation: stored
-                )
-        else {
+        switch loadKEKDataRepresentation(service: service) {
+        case .found(let stored) where reconstructKEK(stored) != nil:
+            return HKDFGuardStatus.success.rawValue
+        case .accessDenied:
+            return HKDFGuardStatus.keychainAccessDenied.rawValue
+        case .found, .notFound, .failed:
             return HKDFGuardStatus.kekVerificationFailed.rawValue
         }
 
-        return HKDFGuardStatus.success.rawValue
-
     case errSecDuplicateItem:
 
-        // Another thread/process won the race.
-        // Validate the winner's key before declaring success.
-        guard
-            let existing =
-                loadKEKDataRepresentation(service: service),
-            let _ =
-                try? SecureEnclave.P256.KeyAgreement.PrivateKey(
-                    dataRepresentation: existing
-                )
-        else {
-            return HKDFGuardStatus.kekCorrupted.rawValue
+        // Another thread/process won the race. Validate the winner's key
+        // before declaring success. If the winner was a differently-signed
+        // process, its item's ACL may deny this one — that is
+        // keychainAccessDenied, not a corrupt item.
+        switch loadKEKDataRepresentation(service: service) {
+        case .found(let existing):
+            guard reconstructKEK(existing) != nil else {
+                return HKDFGuardStatus.kekCorrupted.rawValue
+            }
+            return HKDFGuardStatus.success.rawValue
+        case .accessDenied:
+            return HKDFGuardStatus.keychainAccessDenied.rawValue
+        case .notFound, .failed:
+            return HKDFGuardStatus.keychainReadFailed.rawValue
         }
-
-        return HKDFGuardStatus.success.rawValue
 
     default:
         return HKDFGuardStatus.keychainWriteFailed.rawValue
@@ -312,15 +375,19 @@ private func getKEK(service: String) -> (status: Int32, key: SecureEnclave.P256.
         return (HKDFGuardStatus.enclaveUnavailable.rawValue, nil)
     }
 
-    guard let existing = loadKEKDataRepresentation(service: service) else {
+    switch loadKEKDataRepresentation(service: service) {
+    case .notFound:
         return (HKDFGuardStatus.kekNotFound.rawValue, nil)
+    case .accessDenied:
+        return (HKDFGuardStatus.keychainAccessDenied.rawValue, nil)
+    case .failed:
+        return (HKDFGuardStatus.keychainReadFailed.rawValue, nil)
+    case .found(let existing):
+        guard let key = reconstructKEK(existing) else {
+            return (HKDFGuardStatus.kekCorrupted.rawValue, nil)
+        }
+        return (HKDFGuardStatus.success.rawValue, key)
     }
-
-    guard let key = try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: existing) else {
-        return (HKDFGuardStatus.kekCorrupted.rawValue, nil)
-    }
-
-    return (HKDFGuardStatus.success.rawValue, key)
 }
 
 /// Computes the "fingerprint" embedded at the front of every wrapped
@@ -472,9 +539,7 @@ public func hkdfguard_kek_exists(
 ) -> Int32 {
     outExists.pointee = 0
 
-    let service = normalizedService(from: servicePtr)
-
-    guard validServiceName(service: service) else {
+    guard let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 
@@ -492,9 +557,7 @@ public func hkdfguard_kek_exists(
 public func hkdfguard_create_kek(
     servicePtr: UnsafePointer<CChar>
 ) -> Int32 {
-    let service = normalizedService(from: servicePtr)
-
-    guard validServiceName(service: service) else {
+    guard let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 
@@ -509,12 +572,10 @@ public func hkdfguard_wrap_dek(
     outPtr: UnsafeMutablePointer<UInt8>,
     outLen: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    let service = normalizedService(from: servicePtr)
-    
-    guard validServiceName(service: service) else {
+    guard let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
-    
+
     return wrapDekCore(service: service, dekPtr: dekPtr, dekLen: dekLen, outPtr: outPtr, outLen: outLen)
 }
 
@@ -535,9 +596,7 @@ public func hkdfguard_generate_and_wrap_dek(
     outPtr: UnsafeMutablePointer<UInt8>,
     outLen: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    let service = normalizedService(from: servicePtr)
-
-    guard validServiceName(service: service) else {
+    guard let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
     
@@ -577,9 +636,7 @@ public func hkdfguard_unwrap_dek(
         return HKDFGuardStatus.invalidInputLength.rawValue
     }
 
-    let service = normalizedService(from: servicePtr)
-
-    guard validServiceName(service: service) else {
+    guard let service = normalizedService(from: servicePtr) else {
         return HKDFGuardStatus.invalidServiceIdentifier.rawValue
     }
 

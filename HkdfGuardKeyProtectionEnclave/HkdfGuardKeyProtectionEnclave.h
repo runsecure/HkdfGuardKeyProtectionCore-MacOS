@@ -67,6 +67,19 @@ FOUNDATION_EXPORT const unsigned char HkdfGuardKeyProtectionEnclaveVersionString
 //                                 decryptionFailed, this specifically means
 //                                 "wrong KEK," not "right KEK, but
 //                                 tampered/mismatched data")
+//  -17  keychainAccessDenied     (the keychain would not say whether an
+//                                 item exists: it is locked or there is no
+//                                 UI session to prompt in, the item's ACL
+//                                 denied this process or the user declined
+//                                 the access prompt, or a required
+//                                 entitlement is missing. A key very likely
+//                                 DOES exist -- do not treat this as
+//                                 kekNotFound and create a replacement, and
+//                                 do not treat it as kekCorrupted and
+//                                 delete anything)
+//  -18  keychainReadFailed       (SecItemCopyMatching failed for a reason
+//                                 other than not-found or the access-denial
+//                                 conditions above)
 //
 // `service` is matched case-insensitively -- every function below
 // lowercases it before validation, storage, or lookup, so

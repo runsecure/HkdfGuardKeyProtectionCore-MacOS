@@ -29,11 +29,24 @@ import PackageDescription
 // package directory. An absolute path sidesteps that entirely: the tool
 // then runs correctly regardless of the caller's cwd, exactly like a
 // normal installed command-line tool should.
-let hkdfguardDylibDir = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent() // this package's own directory
-    .appendingPathComponent("../build/Release")
-    .standardizedFileURL
-    .path
+//
+// HKDFGUARD_DYLIB_DIR overrides that default directory. build-dist.sh uses
+// it to link each architecture's CLI against the matching per-architecture
+// dylib build (build-x86_64/Release, build-arm64/Release) -- the linker
+// refuses to link an x86_64 executable against an arm64-only dylib, so a
+// single hardcoded directory can only ever produce a host-architecture
+// CLI. Pair an override with a distinct --scratch-path per architecture so
+// one build's cached manifest/linker flags can't bleed into the other's.
+let hkdfguardDylibDir: String = {
+    if let override = ProcessInfo.processInfo.environment["HKDFGUARD_DYLIB_DIR"], !override.isEmpty {
+        return override
+    }
+    return URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent() // this package's own directory
+        .appendingPathComponent("../build/Release")
+        .standardizedFileURL
+        .path
+}()
 let hkdfguardDylibPath = "\(hkdfguardDylibDir)/HkdfGuard.Kms.MacOS.v1.dylib"
 
 let package = Package(
