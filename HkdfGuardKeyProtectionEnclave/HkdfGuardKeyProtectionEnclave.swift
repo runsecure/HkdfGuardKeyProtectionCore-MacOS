@@ -93,7 +93,15 @@ private func keychainItemAttributes(service: String, mode: KeychainMode) -> [Str
         // item, and so the intent is visible rather than a default.
         kSecAttrSynchronizable as String: false,
     ]
-    if case .dataProtection(let accessGroup) = mode {
+    switch mode {
+    case .legacy:
+        // Explicit false, not omitted: on newer SDKs an omitted key can
+        // default to the data-protection keychain rather than the legacy
+        // file-based one for a process that also carries
+        // keychain-access-groups, which would silently defeat the two
+        // keychains' disjointness.
+        attributes[kSecUseDataProtectionKeychain as String] = false
+    case .dataProtection(let accessGroup):
         attributes[kSecUseDataProtectionKeychain as String] = true
         attributes[kSecAttrAccessGroup as String] = accessGroup
     }

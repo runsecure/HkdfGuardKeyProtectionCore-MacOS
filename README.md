@@ -133,6 +133,15 @@ consumers see `kekNotFound`. `hkdfguard_keychain_mode` reports the mode and
 the CLI prints it on every command. Both modes set
 `kSecAttrSynchronizable = false`; iCloud Keychain never sees these items.
 
+`kSecUseDataProtectionKeychain` is set explicitly for both modes —
+`true` for data-protection, `false` for legacy — never omitted. On the
+current SDK an omitted key can default to the data-protection keychain for
+a process that also carries `keychain-access-groups`, which would silently
+defeat this disjointness for any call made with `mode: .legacy` from inside
+an entitled process. Covered by `dataProtectionModeStoresItemsOnlyInTheDataProtectionKeychain`
+(see Tests), which asserts a data-protection item is invisible to an
+explicit legacy-mode query from the same process.
+
 ## Access policy and headless use
 
 Every KEK is created with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and
@@ -424,6 +433,13 @@ matters most: the bundled CLI provisions a KEK and wraps a DEK, and this
 differently-signed host unwraps it through the library **with no
 interactive prompt** — the production topology, with access granted by
 securityd from the two signed identities alone.
+
+Last run to a full pass (63/63, both suites) on real Secure Enclave
+hardware via `xcodebuild test -scheme HkdfGuardKeyProtectionEnclaveTests-Hosted
+-allowProvisioningUpdates`, including
+`dataProtectionModeStoresItemsOnlyInTheDataProtectionKeychain` (see
+"Keychain modes" above) and `bundledCliProvisionsAndWrapsInDataProtectionModeAndEntitledHostUnwraps`,
+the end-to-end cross-process round trip.
 
 Both app targets need a **Mac App Development provisioning profile**, which
 Xcode's automatic signing creates once this Mac is registered as a device in

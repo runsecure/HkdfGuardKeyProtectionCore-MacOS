@@ -414,6 +414,8 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
             kSecAttrService as String: service,
             kSecAttrAccount as String: hkdfguardKeychainAccount,
             kSecReturnAttributes as String: true,
+            // Explicit false, not omitted -- see keychainItemAttributes.
+            kSecUseDataProtectionKeychain as String: false,
         ]
         var legacyItem: CFTypeRef?
         #expect(SecItemCopyMatching(legacyQuery as CFDictionary, &legacyItem) == errSecItemNotFound)

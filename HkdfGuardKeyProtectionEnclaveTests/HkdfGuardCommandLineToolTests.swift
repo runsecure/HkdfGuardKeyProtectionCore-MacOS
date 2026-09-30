@@ -836,7 +836,12 @@ struct HkdfGuardCommandLineToolTests {
             kSecAttrAccount as String: hkdfguardKeychainAccount,
             kSecAttrSynchronizable as String: false,
         ]
-        if case .dataProtection(let accessGroup) = hkdfguardKeychainMode {
+        switch hkdfguardKeychainMode {
+        case .legacy:
+            // Explicit false, not omitted -- see keychainItemAttributes in
+            // HkdfGuardKeyProtectionEnclave.swift.
+            query[kSecUseDataProtectionKeychain as String] = false
+        case .dataProtection(let accessGroup):
             query[kSecUseDataProtectionKeychain as String] = true
             query[kSecAttrAccessGroup as String] = accessGroup
         }
