@@ -248,6 +248,114 @@ disables `DYLD_*` environment overrides (which can otherwise redirect which
 dylib a process loads) and enforces library validation, so the CLI only
 loads dylibs signed by the same Team or by Apple.
 
+## Publishing a release
+
+Distribution is a tagged GitHub Release carrying the `dist/` output as
+assets — not a package published to PyPI/npm/Maven/NuGet. That keeps a
+single, manually-signed artifact as the only thing every consumer trusts,
+which matches how this project is built (no CI; a person runs
+`build-dist.sh` and signs locally).
+
+```sh
+VERSION=v1.2.0
+
+./build-dist.sh                       # or with HKDFGUARD_SIGN_IDENTITY for Developer ID
+
+(cd dist/osx-x64   && zip -r "../HkdfGuard.Kms.MacOS.v1-$VERSION-osx-x64.zip"   .)
+(cd dist/osx-arm64 && zip -r "../HkdfGuard.Kms.MacOS.v1-$VERSION-osx-arm64.zip" .)
+
+git tag "$VERSION"
+git push origin "$VERSION"
+
+gh release create "$VERSION" \
+  dist/HkdfGuard.Kms.MacOS.v1-$VERSION-osx-x64.zip \
+  dist/HkdfGuard.Kms.MacOS.v1-$VERSION-osx-arm64.zip \
+  --title "$VERSION" \
+  --notes "See README for the C ABI and per-language consumption notes."
+```
+
+Each zip already contains its own `SHA256SUMS` (written by `build-dist.sh`)
+alongside the dylib, header, and CLI, so a consumer can verify the archive's
+contents without a separate manifest. Confirm the tag before pushing it or
+running `gh release create` — a release, unlike a local build, is visible
+and hard to fully retract once someone has pulled it.
+
+## Consuming this library
+
+Every consumer needs three files from a release's zip:
+`HkdfGuard.Kms.MacOS.v1.dylib`, `HkdfGuardKeyProtectionEnclave.h` (for the
+exact signatures — see [C ABI](#c-abi)), and, if provisioning from that
+process, `hkdfguard-v1-initialize`. Verify the download against the zip's
+`SHA256SUMS` before loading it.
+
+A `dlopen`/FFI host in any of these languages is, by definition, a bare
+executable with no `keychain-access-groups` entitlement, so it always runs
+in **legacy keychain mode** (see [Keychain modes](#keychain-modes-hybrid)) —
+its KEKs live in the login keychain, gated by the login session being
+unlocked, not by an access group shared with a signed app bundle.
+
+**Python** (`ctypes`, standard library):
+
+```python
+import ctypes
+
+lib = ctypes.CDLL("./HkdfGuard.Kms.MacOS.v1.dylib")
+lib.hkdfguard_create_kek.argtypes = [ctypes.c_char_p]
+lib.hkdfguard_create_kek.restype = ctypes.c_int32
+
+status = lib.hkdfguard_create_kek(b"com.example.ingest")
+```
+
+**Node** (`koffi`):
+
+```js
+const koffi = require("koffi");
+const lib = koffi.load("./HkdfGuard.Kms.MacOS.v1.dylib");
+const hkdfguard_create_kek = lib.func("int32_t hkdfguard_create_kek(const char *service)");
+
+const status = hkdfguard_create_kek("com.example.ingest");
+```
+
+**Java** (JNA):
+
+```java
+public interface HkdfGuard extends Library {
+    HkdfGuard INSTANCE = Native.load("./HkdfGuard.Kms.MacOS.v1.dylib", HkdfGuard.class);
+    int hkdfguard_create_kek(String service);
+}
+
+int status = HkdfGuard.INSTANCE.hkdfguard_create_kek("com.example.ingest");
+```
+
+**Go** (`cgo`, needs the header at build time):
+
+```go
+/*
+#cgo LDFLAGS: -L${SRCDIR} -lHkdfGuard.Kms.MacOS.v1
+#include "HkdfGuardKeyProtectionEnclave.h"
+*/
+import "C"
+
+status := C.hkdfguard_create_kek(C.CString("com.example.ingest"))
+```
+
+(A `cgo`-free option exists too: [`purego`](https://github.com/ebitengine/purego)
+`dlopen`s the dylib and calls it by symbol name, like the other
+non-`cgo` bindings above.)
+
+**C#** (P/Invoke):
+
+```csharp
+[DllImport("HkdfGuard.Kms.MacOS.v1", CallingConvention = CallingConvention.Cdecl)]
+static extern int hkdfguard_create_kek(string service);
+
+int status = hkdfguard_create_kek("com.example.ingest");
+```
+
+The `dist/osx-x64` / `dist/osx-arm64` folder names are already .NET runtime
+identifiers, so a C# consumer can drop them straight into a NuGet package's
+`runtimes/{rid}/native/` layout instead of loading the zip by hand.
+
 ## Signing and entitlements
 
 - The **framework** target has `com.apple.security.app-sandbox`. It does not
