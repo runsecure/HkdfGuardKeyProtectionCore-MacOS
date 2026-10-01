@@ -68,8 +68,9 @@
 // below for the exact sequence and its one intentional fallback. --force
 // only ever overwrites and removes a *regular file*: a symbolic link at
 // <key-file-path> is refused rather than followed (so a planted link can't
-// redirect the destructive overwrite onto some other file), as is a FIFO,
-// device, or directory.
+// redirect the destructive overwrite onto some other file), as is a regular
+// file with more than one hard link (the same redirection, through a link
+// O_NOFOLLOW cannot see), a FIFO, a device, or a directory.
 //
 // `wrap` creates nothing but the output file, and only after every argument
 // has been validated. `provision` creates nothing until its service name
@@ -750,7 +751,11 @@ func writeAll(fd: Int32, bytes: UnsafeBufferPointer<UInt8>, context: String) thr
 // open on a reader-less FIFO from blocking forever, and the fstat check
 // after open rejects a FIFO, device node, or directory before a single
 // byte is written (a device node opened for writing by a privileged
-// invocation would otherwise be overwritten).
+// invocation would otherwise be overwritten). It also rejects a regular
+// file with more than one hard link: a hard link planted at <key-file-path>
+// is indistinguishable from the original file to O_NOFOLLOW and S_IFREG,
+// so without this check the passes would destroy the shared contents of
+// whatever file it was linked to.
 //
 // Caveat this can't fully solve, worth knowing rather than assuming away:
 // on copy-on-write/log-structured filesystems (e.g. APFS) and on SSDs
@@ -761,10 +766,12 @@ func writeAll(fd: Int32, bytes: UnsafeBufferPointer<UInt8>, context: String) thr
 // This is a best-effort measure against casual recovery (e.g. `strings` on
 // the raw device, a filesystem-level undelete), not a cryptographic
 // guarantee against a determined attacker with access to the raw flash.
-func requireRegularFile(mode: mode_t, path: String) throws {
-    switch mode & S_IFMT {
+func requireRegularFile(_ st: stat, path: String) throws {
+    switch st.st_mode & S_IFMT {
     case S_IFREG:
-        return
+        guard st.st_nlink <= 1 else {
+            throw CLIError("\(path) has \(st.st_nlink) hard links; refusing to overwrite it, since that would also destroy the other linked file -- remove \(path) yourself if it should be replaced")
+        }
     case S_IFLNK:
         throw CLIError("\(path) is a symbolic link; refusing to overwrite through it -- remove the link, or point <key-file-path> at a regular file")
     default:
@@ -786,7 +793,7 @@ func refuseUnlessAbsentOrRegularFile(path: String) throws {
         }
         throw CLIError("failed to stat \(path): \(String(cString: strerror(errno)))")
     }
-    try requireRegularFile(mode: st.st_mode, path: path)
+    try requireRegularFile(st, path: path)
 }
 
 func secureOverwriteAndRemoveIfExists(path: String) throws {
@@ -805,7 +812,7 @@ func secureOverwriteAndRemoveIfExists(path: String) throws {
             // regular file.
             var st = stat()
             if lstat(path, &st) == 0 {
-                try requireRegularFile(mode: st.st_mode, path: path)
+                try requireRegularFile(st, path: path)
             }
             if unlink(path) != 0 && errno != ENOENT {
                 throw CLIError("failed to remove \(path): \(String(cString: strerror(errno)))")
@@ -828,7 +835,7 @@ func secureOverwriteAndRemoveIfExists(path: String) throws {
     }
     // Checked on the opened descriptor, so it can't be raced by swapping
     // the path out between a separate stat and this open.
-    try requireRegularFile(mode: st.st_mode, path: path)
+    try requireRegularFile(st, path: path)
     let fileSize = Int(st.st_size)
 
     if fileSize > 0 {

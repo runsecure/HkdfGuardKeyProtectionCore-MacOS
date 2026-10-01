@@ -225,8 +225,11 @@ hkdfguard-v1-initialize retire --service-name|-sn <name> \
   with an explanation.
 - **`--force`** securely overwrites an existing `<path>` (eight alternating
   zero/random passes, each `fsync`ed) before replacing it. It only ever
-  touches a **regular file**: a symlink at `<path>` is refused rather than
-  followed (`O_NOFOLLOW` + `fstat`), as is a FIFO, device, or directory.
+  touches a **regular file with a single link**: a symlink at `<path>` is
+  refused rather than followed (`O_NOFOLLOW` + `fstat`), and so is a file
+  with more than one hard link, since overwriting it would also destroy
+  whatever other file shares its contents. A FIFO, device, or directory is
+  refused too.
 
 Exit codes: `0` success, `1` runtime failure, `2` argument error (usage
 printed). Nothing persistent is touched until every argument is validated.
@@ -443,7 +446,7 @@ Two Swift Testing suites, both `.serialized`:
   unentitled process is reported as `-17`, never as "no key").
 - **`HkdfGuardCommandLineToolTests`** builds and runs the real CLI as a
   subprocess: `provision`/`wrap` semantics, DEK sources, rejected
-  arguments, `--force` symlink/FIFO refusal, file permissions, exit codes.
+  arguments, `--force` symlink/hard-link/FIFO refusal, file permissions, exit codes.
 
 Both need a real Secure Enclave and are skipped on CI/VM runners. Every test
 that provisions a key deletes its keychain item afterward — in whichever

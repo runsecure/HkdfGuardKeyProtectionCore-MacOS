@@ -553,6 +553,38 @@ struct HkdfGuardCommandLineToolTests {
         #expect(!Self.kekItemExists(service: service))
     }
 
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliForceRefusesToOverwriteThroughHardLink() throws {
+        // The hard-link twin of the symlink case: O_NOFOLLOW can't see a
+        // hard link, and it is a regular file, so only the link count
+        // reveals that the overwrite passes would destroy another file.
+        let service = "com.hkdfguard.tests.cli.force.hardlink"
+        defer { Self.deleteKEK(service: service) }
+        let targetPath = Self.makeTempFilePath()
+        let linkPath = Self.makeTempFilePath()
+        defer {
+            try? FileManager.default.removeItem(atPath: linkPath)
+            try? FileManager.default.removeItem(atPath: targetPath)
+        }
+        let original = Data("do not destroy me".utf8)
+        try original.write(to: URL(fileURLWithPath: targetPath))
+        #expect(link(targetPath, linkPath) == 0)
+
+        // Provisioned, so the wrap itself would succeed: only the link-count
+        // check stands between this command and the overwrite passes.
+        try Self.provision(service: service)
+
+        let result = try Self.runCLI(
+            ["wrap", "--key-file-path", linkPath, "--service-name", service, "--dek-stdin", "--force"],
+            stdin: Self.base64Stdin(Self.randomDEK())
+        )
+        #expect(result.exitCode == 1)
+        #expect(result.stderr.contains("hard links"), "stderr: \(result.stderr)")
+
+        #expect(try Data(contentsOf: URL(fileURLWithPath: targetPath)) == original)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: linkPath)) == original, "the link must not have been removed")
+    }
+
     @Test func cliForceRefusesNonRegularFile() throws {
         let service = "com.hkdfguard.tests.cli.force.fifo"
         defer { Self.deleteKEK(service: service) }
