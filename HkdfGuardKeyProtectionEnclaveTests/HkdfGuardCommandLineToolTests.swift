@@ -420,7 +420,7 @@ struct HkdfGuardCommandLineToolTests {
 
         let attributes = try FileManager.default.attributesOfItem(atPath: keyFilePath)
         let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
-        #expect(permissions == 0o640)
+        #expect(permissions == 0o600)
 
         let wrapped = try Data(contentsOf: URL(fileURLWithPath: keyFilePath))
         #expect(wrapped.count == 156) // 32-byte KEK fingerprint + 64-byte ephemeral pubkey + 12-byte nonce + 32-byte ciphertext + 16-byte tag

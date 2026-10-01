@@ -28,7 +28,7 @@
 // (HkdfGuardKeyProtectionCore-Linux/src/bin/hkdfguard-v1-initialize.rs),
 // with two deliberate differences: the Linux tool's `--dek <base64>`
 // argument is not offered here at all (see "DEK sources" below for why),
-// and the output file is written with POSIX 0640 permissions (see
+// and the output file is written with POSIX 0600 permissions (see
 // writeWrappedKeyFile).
 //
 // The KEK's `service` identity is exactly the caller-supplied
@@ -60,7 +60,7 @@
 // shell's history file. Both stdin and a file avoid that entirely.
 //
 // The wrapped payload is written to <key-file-path> with POSIX permissions
-// 0640 (owner read/write, group read, no access for anyone else) -- set
+// 0600 (owner read/write, no access for anyone else) -- set
 // atomically at file-creation time. With --force against a pre-existing
 // file, that file's old contents are securely overwritten in place (8
 // alternating all-zero/random passes) and then deleted before the new file
@@ -699,8 +699,9 @@ func readSuppliedDekBase64(_ source: DekSource) throws -> String {
 // MARK: - Writing the wrapped key file
 
 // The permissions every wrapped-key file is written with: owner
-// read/write, group read, no access for anyone else (POSIX 0640).
-let keyFilePermissions: mode_t = 0o640
+// read/write, no access for anyone else (POSIX 0600). The user who wraps
+// must be the user whose keychain holds the KEK, so the same user unwraps.
+let keyFilePermissions: mode_t = 0o600
 
 // Number of secure-overwrite passes secureOverwriteAndRemoveIfExists below
 // performs on a pre-existing file before deleting it, alternating an
@@ -1029,7 +1030,7 @@ func runWrap(_ args: WrapArgs) throws {
 
     try writeWrappedKeyFile(path: args.keyFilePath, bytes: wrapped, force: args.force)
 
-    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0640, service \"\(args.serviceName)\", keychain: \(keychainModeName()))")
+    print("wrapped key written to \(args.keyFilePath) (\(wrapped.count) bytes, permissions 0600, service \"\(args.serviceName)\", keychain: \(keychainModeName()))")
 }
 
 // MARK: - Entry point

@@ -158,6 +158,14 @@ using the key never triggers a Touch ID/password prompt. Consequences:
   unlocked.
 - The protection boundary is *which processes may read the keychain item*
   (the keychain mode's job), not *a human approved this use*.
+- **Everything runs as one macOS user.** Both keychains are per-user, so a
+  KEK provisioned by one account is invisible to every other account —
+  administrator or not. `provision`, `wrap`, and the application that
+  unwraps must all run as the same user, in the same keychain mode. A
+  different user gets `kekNotFound` (`-10`), and running `provision` there
+  would silently create a second, unrelated KEK under the same name. `sudo`
+  does not bridge users; it runs in a different keychain context. No
+  administrator rights are needed for any of these operations.
 
 The policy is fixed; there is no per-service override. The library has no
 delete or rotate API — a service that needs a new KEK adopts a new service
@@ -217,7 +225,12 @@ hkdfguard-v1-initialize retire --service-name|-sn <name> \
 - **`wrap`** wraps the pipeline's existing 32-byte DEK — base64, read from
   **stdin** (`--dek-stdin`, trailing newline fine) or a **file**
   (`--dek-file`) — under the already-provisioned KEK and writes the 156-byte
-  payload to `<path>` with POSIX `0640` permissions set at creation. It
+  payload to `<path>` with POSIX `0600` permissions set at creation: owner
+  read/write, nothing for anyone else. That fits the one-user model (see
+  "Everything runs as one macOS user" above): the user who wraps owns the
+  file and is the same user whose application unwraps it. If a deploy step
+  later copies or `chown`s the file to another account, that account must
+  also be the one holding the KEK. It
   never creates a KEK (an unprovisioned service is an error naming the
   `provision` command) and never generates a DEK. There is deliberately no
   `--dek <base64>` argument: an argv value is visible to every process via
@@ -338,11 +351,23 @@ exact signatures — see [C ABI](#c-abi)), and, if provisioning from that
 process, `hkdfguard-v1-initialize`. Verify the download against the zip's
 `SHA256SUMS` before loading it.
 
-A `dlopen`/FFI host in any of these languages is, by definition, a bare
-executable with no `keychain-access-groups` entitlement, so it always runs
-in **legacy keychain mode** (see [Keychain modes](#keychain-modes-hybrid)) —
-its KEKs live in the login keychain, gated by the login session being
-unlocked, not by an access group shared with a signed app bundle.
+A `dlopen`/FFI host in any of these languages runs in **legacy keychain
+mode** (see [Keychain modes](#keychain-modes-hybrid)) unless the host
+process is itself a Team-signed app bundle carrying the
+`keychain-access-groups` entitlement — which a stock `python`, `node`,
+`java`, or `dotnet` binary is not. In legacy mode its KEKs live in the login
+keychain, gated by the login session being unlocked, not by an access group
+shared with a signed app bundle.
+
+**Legacy mode trusts the runtime, not your code.** The login keychain's ACL
+identifies the *executable* that asks for the item. For an interpreted or
+managed consumer that executable is the interpreter or runtime (`python3`,
+`node`, `java`, `dotnet`), so the operator's "Always Allow" is granted to
+that runtime as a whole. From then on, **any** script or program run by
+that runtime, as that user, can unwrap every DEK under that service with no
+prompt. For production, package the consumer as a Team-signed app bundle
+entitled for the shared access group so it runs in data-protection mode,
+where access is granted to your signed identity alone.
 
 **Python** (`ctypes`, standard library):
 
@@ -499,6 +524,6 @@ provisioning and the unhosted scheme is unaffected.
 ## Differences from the Linux tool
 
 Deliberate divergences from `hkdfguard-v1-initialize.rs`: separate
-`provision` and `wrap` commands; the key file path is `--key-file-path`,
-not positional; no `--dek <base64>` argument (stdin or file only); output
-file permissions `0640`.
+`provision`, `wrap`, and `retire` commands; the key file path is
+`--key-file-path`, not positional; no `--dek <base64>` argument (stdin or
+file only); output file permissions `0600`.
