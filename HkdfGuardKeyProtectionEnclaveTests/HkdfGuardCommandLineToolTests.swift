@@ -52,7 +52,7 @@ import CryptoKit
 /// Separately: the *first* CLI subprocess launch after a freshly built
 /// binary was also observed to take several seconds longer than later
 /// launches — Gatekeeper's first-launch check, most likely — independent
-/// of the keychain-prompt issue above. `ensureCLIBuilt()`
+/// of the keychain-prompt issue above. `toolsBuilt`
 /// below deliberately builds the tool once, up front, outside of any
 /// individual test's timing, so that one-time cost doesn't land on
 /// whichever test happens to run first.
@@ -167,8 +167,8 @@ struct HkdfGuardCommandLineToolTests {
     /// macOS): the child blocks in `write(2)` waiting for a reader, the
     /// parent blocks in `waitUntilExit` waiting for the child. The CLI
     /// itself writes a line or two, but this same helper also launches
-    /// `xcodebuild` and `swift build` (via `ensureDylibBuilt`/
-    /// `ensureCLIBuilt`), whose logs are far larger than 64KB — observed
+    /// `xcodebuild` and `swift build` (via `buildDylib`/
+    /// `buildCLI`), whose logs are far larger than 64KB — observed
     /// directly: on a clean checkout the nested Release-dylib build
     /// finished its work in under a minute and then sat for 20 minutes
     /// blocked in `write` on a full 65536-byte pipe, with this test host
@@ -237,14 +237,16 @@ struct HkdfGuardCommandLineToolTests {
         return (process.terminationStatus, stdout, stderr)
     }
 
-    /// Builds the Release dylib the CLI tool links against, if it isn't
-    /// already sitting at the fixed path both this file and the tool's own
-    /// Package.swift expect. A CI/dev environment that already ran a
-    /// Release build of `HkdfGuardKeyProtectionEnclaveDylib` pays nothing
-    /// here beyond the file-existence check.
-    private static func ensureDylibBuilt() throws {
-        guard !FileManager.default.fileExists(atPath: dylibPath) else { return }
+    /// Builds the Release dylib and the CLI once per test run. Always
+    /// invoked, not skipped when binaries already exist: both builds are
+    /// incremental, and skipping them let the suite silently test a stale
+    /// CLI that no longer matched its source.
+    private static let toolsBuilt: Result<Void, Error> = Result {
+        try buildDylib()
+        try buildCLI()
+    }
 
+    private static func buildDylib() throws {
         let result = try run(
             URL(fileURLWithPath: "/usr/bin/xcodebuild"),
             [
@@ -260,14 +262,11 @@ struct HkdfGuardCommandLineToolTests {
         }
     }
 
-    /// Builds the `hkdfguard-v1-initialize` executable via SwiftPM, if it
-    /// isn't already built. Depends on `ensureDylibBuilt()` having run
-    /// first — the tool links against the dylib's fixed path at build time
-    /// (see its own Package.swift) as well as at run time via `-rpath`.
-    private static func ensureCLIBuilt() throws {
-        try ensureDylibBuilt()
-        guard !FileManager.default.fileExists(atPath: cliExecutablePath) else { return }
-
+    /// Builds the `hkdfguard-v1-initialize` executable via SwiftPM. Must run
+    /// after `buildDylib()` — the tool links against the dylib's fixed path
+    /// at build time (see its own Package.swift) as well as at run time via
+    /// `-rpath`.
+    private static func buildCLI() throws {
         let result = try run(
             URL(fileURLWithPath: "/usr/bin/env"),
             ["swift", "build", "-c", "release"],
@@ -281,7 +280,7 @@ struct HkdfGuardCommandLineToolTests {
     /// Runs the built `hkdfguard-v1-initialize` executable with
     /// `arguments`, building it first if needed.
     private static func runCLI(_ arguments: [String], stdin: Data? = nil) throws -> (exitCode: Int32, stdout: String, stderr: String) {
-        try ensureCLIBuilt()
+        try toolsBuilt.get()
         return try run(URL(fileURLWithPath: cliExecutablePath), arguments, stdin: stdin)
     }
 
@@ -885,5 +884,101 @@ struct HkdfGuardCommandLineToolTests {
         // Disjoint keychains: the legacy login keychain (what the bare CLI
         // and the `security` tool see) must have no trace of this KEK.
         #expect(!Self.kekItemExists(service: service))
+    }
+
+    @Test(.enabled(if: dataProtectionRoundTripEnabled && SecureEnclave.isAvailable, "requires the entitled HkdfGuardTestHost and the bundled CLI (data-protection mode)"))
+    func bundledCliRetiresDataProtectionKek() throws {
+        // The case retire exists for: a data-protection item is invisible to
+        // Keychain Access and `security`, so only an entitled process can
+        // remove it.
+        let service = "com.hkdfguard.tests.cli.dataprotection.retire"
+        defer { Self.deleteKEKInProcess(service: service) }
+        let cli = URL(fileURLWithPath: Self.bundledCLIPath)
+
+        let provision = try Self.run(cli, ["provision", "--service-name", service])
+        #expect(provision.exitCode == 0, "provision failed: \(provision.stderr)")
+        let fingerprint = try #require(Self.fingerprint(fromProvisionOutput: provision.stdout))
+        #expect(Self.libraryReportsKek(service: service) == true)
+
+        let retire = try Self.run(cli, ["retire", "--service-name", service, "--fingerprint", fingerprint])
+        #expect(retire.exitCode == 0, "retire failed: \(retire.stderr)")
+        #expect(retire.stdout.contains("keychain: data-protection"), "stdout: \(retire.stdout)")
+        #expect(Self.libraryReportsKek(service: service) == false)
+    }
+
+    /// Whether the library, in this host's mode, sees a KEK for `service`.
+    /// `nil` when the lookup itself failed.
+    private static func libraryReportsKek(service: String) -> Bool? {
+        var exists: Int32 = -1
+        let status = service.withCString { hkdfguard_kek_exists(servicePtr: $0, outExists: &exists) }
+        return status == 0 ? exists == 1 : nil
+    }
+
+    // MARK: - retire
+
+    /// The 64-hex-character value from provision's "fingerprint: <hex>" line.
+    private static func fingerprint(fromProvisionOutput stdout: String) -> String? {
+        for line in stdout.split(separator: "\n") where line.hasPrefix("fingerprint: ") {
+            let hex = line.dropFirst("fingerprint: ".count).prefix(64)
+            return hex.count == 64 ? String(hex) : nil
+        }
+        return nil
+    }
+
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliRetireRequiresTheMatchingFingerprint() throws {
+        let service = "com.hkdfguard.tests.cli.retire.roundtrip"
+        defer { Self.deleteKEK(service: service) }
+
+        let provision = try Self.runCLI(["provision", "--service-name", service])
+        #expect(provision.exitCode == 0, "provision failed: \(provision.stderr)")
+        let fingerprint = try #require(Self.fingerprint(fromProvisionOutput: provision.stdout), "stdout: \(provision.stdout)")
+
+        // Re-provisioning reports the same KEK, by the same fingerprint.
+        let again = try Self.runCLI(["provision", "--service-name", service])
+        #expect(Self.fingerprint(fromProvisionOutput: again.stdout) == fingerprint)
+
+        // One nibble off: refused, nothing deleted.
+        let lastNibble = fingerprint.last == "0" ? "1" : "0"
+        let wrong = String(fingerprint.dropLast()) + lastNibble
+        let refused = try Self.runCLI(["retire", "--service-name", service, "--fingerprint", wrong])
+        #expect(refused.exitCode == 1)
+        #expect(refused.stderr.contains("fingerprint mismatch"), "stderr: \(refused.stderr)")
+        #expect(Self.kekItemExists(service: service))
+
+        // Exact match, supplied in uppercase: deleted.
+        let retired = try Self.runCLI(["retire", "-sn", service, "-fp", fingerprint.uppercased()])
+        #expect(retired.exitCode == 0, "retire failed: \(retired.stderr)")
+        #expect(retired.stdout.contains("retired KEK"))
+        #expect(!Self.kekItemExists(service: service))
+
+        let secondRetire = try Self.runCLI(["retire", "--service-name", service, "--fingerprint", fingerprint])
+        #expect(secondRetire.exitCode == 1)
+        #expect(secondRetire.stderr.contains("nothing to retire"), "stderr: \(secondRetire.stderr)")
+    }
+
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliRetireWithoutKekReportsNothingToRetire() throws {
+        let service = "com.hkdfguard.tests.cli.retire.unprovisioned"
+        defer { Self.deleteKEK(service: service) }
+        let result = try Self.runCLI(["retire", "--service-name", service, "--fingerprint", String(repeating: "ab", count: 32)])
+        #expect(result.exitCode == 1)
+        #expect(result.stderr.contains("nothing to retire"), "stderr: \(result.stderr)")
+        #expect(!Self.kekItemExists(service: service))
+    }
+
+    @Test func cliRetireRejectsMalformedOrMissingFingerprint() throws {
+        let service = "com.hkdfguard.tests.cli.retire.malformed"
+        let cases: [(args: [String], message: String)] = [
+            ([], "missing required --fingerprint"),
+            (["--fingerprint", "abc"], "exactly 64 hex characters"),
+            (["--fingerprint", String(repeating: "zz", count: 32)], "only hex characters"),
+            (["--fingerprint", String(repeating: "ab", count: 33)], "exactly 64 hex characters"),
+        ]
+        for testCase in cases {
+            let result = try Self.runCLI(["retire", "--service-name", service] + testCase.args)
+            #expect(result.exitCode == 2, "\(testCase.args): exit \(result.exitCode)")
+            #expect(result.stderr.contains(testCase.message), "\(testCase.args): stderr: \(result.stderr)")
+        }
     }
 }

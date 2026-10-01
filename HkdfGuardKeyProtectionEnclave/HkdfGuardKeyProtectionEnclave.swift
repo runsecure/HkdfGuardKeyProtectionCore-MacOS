@@ -696,6 +696,41 @@ public func hkdfguard_kek_exists(
     return status
 }
 
+/// Writes the 32-byte fingerprint (SHA-256 of the public key) of the KEK
+/// `service` currently resolves to -- the same value embedded at the front
+/// of every payload wrapped under it. Public-key material only, so safe to
+/// expose; lets an operator pin which KEK a service uses and confirm it
+/// before retiring it. Never creates a KEK.
+@_cdecl("hkdfguard_kek_fingerprint")
+public func hkdfguard_kek_fingerprint(
+    servicePtr: UnsafePointer<CChar>?,
+    outPtr: UnsafeMutablePointer<UInt8>?,
+    outLen: UnsafeMutablePointer<Int32>?
+) -> Int32 {
+    guard let outPtr, let outLen else {
+        return HKDFGuardStatus.invalidInputLength.rawValue
+    }
+    guard Int(outLen.pointee) >= hkdfguardFingerprintLength else {
+        outLen.pointee = Int32(hkdfguardFingerprintLength)
+        return HKDFGuardStatus.outputBufferTooSmall.rawValue
+    }
+    guard let servicePtr, let service = normalizedService(from: servicePtr) else {
+        return HKDFGuardStatus.invalidServiceIdentifier.rawValue
+    }
+
+    let (status, maybeKey) = getKEK(service: service)
+    guard let key = maybeKey else {
+        return status
+    }
+
+    let fingerprint = kekFingerprint(publicKeyRaw: key.publicKey.rawRepresentation)
+    _ = fingerprint.withUnsafeBytes { raw in
+        memcpy(outPtr, raw.baseAddress!, fingerprint.count)
+    }
+    outLen.pointee = Int32(fingerprint.count)
+    return HKDFGuardStatus.success.rawValue
+}
+
 /// Creates a Secure Enclave KEK for `service` if one doesn't already
 /// exist. Paired with `hkdfguard_kek_exists` above so a caller can decide
 /// for itself whether creation is needed — e.g. prompting for user

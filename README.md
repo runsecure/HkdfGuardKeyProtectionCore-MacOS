@@ -77,6 +77,7 @@ required — a NULL is reported, never dereferenced.
 ```c
 int32_t hkdfguard_keychain_mode(int32_t* out_mode);          // 0 legacy, 1 data-protection
 int32_t hkdfguard_kek_exists(const char* service, int32_t* out_exists);
+int32_t hkdfguard_kek_fingerprint(const char* service, uint8_t* out, int32_t* out_len); // 32 bytes, public
 int32_t hkdfguard_create_kek(const char* service);            // the only function that creates a KEK
 int32_t hkdfguard_wrap_dek(const char* service, const uint8_t* dek, int32_t dek_len,
                            uint8_t* out, int32_t* out_len);
@@ -158,14 +159,33 @@ using the key never triggers a Touch ID/password prompt. Consequences:
 - The protection boundary is *which processes may read the keychain item*
   (the keychain mode's job), not *a human approved this use*.
 
-The policy is fixed; there is no per-service override, and there is no
+The policy is fixed; there is no per-service override. The library has no
 delete or rotate API — a service that needs a new KEK adopts a new service
-name.
+name — and deletion exists only as the CLI's fingerprint-confirmed
+`retire` command (below), so no process that merely loads the dylib gets a
+one-call wipe.
+
+### If a KEK is compromised
+
+Retiring the KEK does not undo a compromise: assume anyone who could use it
+has already unwrapped every DEK they could reach. Recover in this order:
+
+1. `provision` a **new service name** and record its fingerprint.
+2. Generate **new DEKs**, re-encrypt the data, and `wrap` them under the new
+   service.
+3. Only then `retire` the old service's KEK. Anything still wrapped under it
+   becomes permanently unrecoverable.
+
+A legacy-mode KEK item can come back if a backup of the login keychain
+taken before retirement is restored onto the same Mac; account for backups
+if the goal is a true crypto-shred.
 
 ## Command-line tool: `hkdfguard-v1-initialize`
 
-Provisions KEKs and wraps DEKs for pipelines. It calls the library only
-through the C ABI above. Two commands:
+Provisions, wraps, and retires KEKs for pipelines. Provisioning and
+wrapping go through the C ABI above only; `retire` additionally deletes the
+keychain item itself, since the library deliberately exports no delete.
+Three commands:
 
 ```
 hkdfguard-v1-initialize provision --service-name|-sn <name>
@@ -174,11 +194,26 @@ hkdfguard-v1-initialize wrap --key-file-path|-kf <path> \
                              --service-name|-sn <name> \
                              ( --dek-stdin | --dek-file <path> ) \
                              [--force|-f]
+
+hkdfguard-v1-initialize retire --service-name|-sn <name> \
+                               --fingerprint|-fp <64 hex chars>
 ```
 
 - **`provision`** creates the KEK for `<name>` if it doesn't exist. The only
   command that creates keys; idempotent (a second run reports "already
-  exists" and exits 0). Prints the keychain mode it used.
+  exists" and exits 0). Prints the keychain mode it used and the KEK's
+  **fingerprint** (SHA-256 of its public key) — record it. On "already
+  exists", compare it with the recorded value: a mismatch means the KEK
+  under that name is not the one you provisioned.
+- **`retire`** deletes the KEK for `<name>`, but only if its current
+  fingerprint equals `<hex>` exactly; a mismatch, a KEK that can't be read
+  (`-17`, `-11`, `-18`), or no KEK at all deletes nothing. The only command
+  that deletes keys, and the only supported way to remove a
+  data-protection-mode KEK, which Keychain Access and `security` cannot see.
+  It must run in the same keychain mode as the KEK (the bundled CLI for
+  data-protection) and refuses if the library's mode and the executable's
+  entitlements disagree. See "If a KEK is compromised" above for when to
+  use it.
 - **`wrap`** wraps the pipeline's existing 32-byte DEK — base64, read from
   **stdin** (`--dek-stdin`, trailing newline fine) or a **file**
   (`--dek-file`) — under the already-provisioned KEK and writes the 156-byte
@@ -201,6 +236,9 @@ Example pipeline use:
 ```sh
 hkdfguard-v1-initialize provision -sn com.example.ingest
 printf '%s' "$DEK_B64" | hkdfguard-v1-initialize wrap -kf /etc/example/ingest.key -sn com.example.ingest --dek-stdin
+
+# Later, after migrating everything to a new service name:
+hkdfguard-v1-initialize retire -sn com.example.ingest -fp <fingerprint printed by provision>
 ```
 
 ## Project layout
@@ -434,12 +472,18 @@ differently-signed host unwraps it through the library **with no
 interactive prompt** — the production topology, with access granted by
 securityd from the two signed identities alone.
 
-Last run to a full pass (63/63, both suites) on real Secure Enclave
-hardware via `xcodebuild test -scheme HkdfGuardKeyProtectionEnclaveTests-Hosted
--allowProvisioningUpdates`, including
+Last run to a full pass (68 tests, both suites, no failures) on real
+Secure Enclave hardware, under both the unhosted and the hosted scheme.
+The hosted run included
 `dataProtectionModeStoresItemsOnlyInTheDataProtectionKeychain` (see
-"Keychain modes" above) and `bundledCliProvisionsAndWrapsInDataProtectionModeAndEntitledHostUnwraps`,
-the end-to-end cross-process round trip.
+"Keychain modes" above), `bundledCliProvisionsAndWrapsInDataProtectionModeAndEntitledHostUnwraps`
+(the end-to-end cross-process round trip), and `bundledCliRetiresDataProtectionKek`.
+Skipped by design: the four opt-in interactive legacy round trips, and the
+one test that only makes sense in an unentitled host.
+
+The CLI suite runs an incremental build of the dylib and the CLI once per
+test run, so it always tests the current source rather than whatever
+binary happens to be on disk.
 
 Both app targets need a **Mac App Development provisioning profile**, which
 Xcode's automatic signing creates once this Mac is registered as a device in

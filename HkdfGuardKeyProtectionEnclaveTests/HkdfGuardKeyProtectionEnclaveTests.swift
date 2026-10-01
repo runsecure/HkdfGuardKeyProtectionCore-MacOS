@@ -540,6 +540,39 @@ struct HkdfGuardKeyProtectionEnclaveWrapUnwrapTests {
         #expect(result.wrapped.count == Self.wrappedLength)
     }
 
+    @Test func kekFingerprintMatchesTheFingerprintEmbeddedInPayloads() {
+        let service = "com.hkdfguard.tests.kek.fingerprint"
+        defer { Self.deleteKEK(service: service) }
+
+        func fingerprint(_ capacity: Int32) -> (status: Int32, bytes: [UInt8], len: Int32) {
+            var out = [UInt8](repeating: 0, count: max(Int(capacity), 0))
+            var len = capacity
+            let status = service.withCString { servicePtr in
+                out.withUnsafeMutableBufferPointer { hkdfguard_kek_fingerprint(servicePtr: servicePtr, outPtr: $0.baseAddress, outLen: &len) }
+            }
+            return (status, out, len)
+        }
+
+        #expect(fingerprint(32).status == -10, "no KEK yet must be kekNotFound")
+
+        #expect(Self.createKEK(service: service) == 0)
+        let tooSmall = fingerprint(31)
+        #expect(tooSmall.status == -2)
+        #expect(tooSmall.len == 32)
+
+        let result = fingerprint(32)
+        #expect(result.status == 0)
+        #expect(result.len == 32)
+        let wrapped = Self.wrap(Self.randomDEK(), service: service)
+        #expect(wrapped.status == 0)
+        #expect(Array(wrapped.wrapped.prefix(32)) == result.bytes)
+
+        var len: Int32 = 32
+        #expect(service.withCString { hkdfguard_kek_fingerprint(servicePtr: $0, outPtr: nil, outLen: &len) } == -1)
+        var out = [UInt8](repeating: 0, count: 32)
+        #expect(out.withUnsafeMutableBufferPointer { hkdfguard_kek_fingerprint(servicePtr: nil, outPtr: $0.baseAddress, outLen: &len) } == -8)
+    }
+
     @Test func twoWrapsOfSameDEKProduceDifferentCiphertext() {
         // Each wrap uses a fresh ephemeral key + random AES-GCM nonce, so
         // wrapping the same DEK twice must never produce identical output —

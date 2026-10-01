@@ -210,6 +210,17 @@ int32_t hkdfguard_kek_exists(
     const char* HKDFGUARD_NONNULL service,
     int32_t* HKDFGUARD_NONNULL out_exists);
 
+// Writes the 32-byte fingerprint (SHA-256 of the KEK's raw public key) of
+// the KEK for `service` to `out` -- the same value embedded at the front of
+// every payload wrapped under it. Public-key material, not a secret. Lets an
+// operator record which KEK a service uses after provisioning, and confirm
+// it before retiring it. `*out_len` must be at least 32 on entry. Never
+// creates a KEK: kekNotFound (-10) if none exists.
+int32_t hkdfguard_kek_fingerprint(
+    const char* HKDFGUARD_NONNULL service,
+    uint8_t* HKDFGUARD_NONNULL out,
+    int32_t* HKDFGUARD_NONNULL out_len);
+
 // Creates a Secure Enclave KEK for `service` if one doesn't already exist.
 // Idempotent, and safe under concurrent first use by several threads or
 // processes: whoever wins the race creates it, everyone else finds it, and

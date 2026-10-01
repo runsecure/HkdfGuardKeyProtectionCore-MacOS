@@ -1,7 +1,8 @@
-// CLI tool with two commands:
+// CLI tool with three commands:
 //
 //   provision  creates the persistent Secure Enclave KEK for a service if it
 //              does not exist yet. The ONLY command that creates keys.
+//              Prints the KEK's fingerprint, to be recorded by the operator.
 //   wrap       wraps a Data Encryption Key (DEK) supplied by the calling
 //              pipeline -- the 32-byte key that pipeline has already
 //              encrypted its data with -- under an already-provisioned KEK,
@@ -9,6 +10,13 @@
 //              KEK: if none exists for the service, it fails and points at
 //              `provision`. It never generates a DEK either: the key is
 //              always the pipeline's, read from stdin or a file.
+//   retire     deletes a service's KEK keychain item, after the operator
+//              proves which KEK they mean by supplying its fingerprint. The
+//              ONLY command that deletes keys, and deliberately implemented
+//              here rather than in the library: the dylib's C ABI offers no
+//              delete, so no consumer that loads it gets a one-call wipe.
+//              Everything wrapped under a retired KEK is permanently
+//              unrecoverable -- retire only after migrating to a new service.
 //
 // Calls into the HkdfGuard library through its stable C ABI (`provision`:
 // `hkdfguard_kek_exists`, then `hkdfguard_create_kek`; `wrap`:
@@ -28,6 +36,9 @@
 //
 // Usage:
 //   hkdfguard-v1-initialize provision --service-name|-sn <name>
+//
+//   hkdfguard-v1-initialize retire --service-name|-sn <name> \
+//       --fingerprint|-fp <64 hex chars>
 //
 //   hkdfguard-v1-initialize wrap \
 //       --key-file-path|-kf <key-file-path> \
@@ -93,6 +104,15 @@ func hkdfguard_kek_exists(_ service: UnsafePointer<CChar>?, _ outExists: UnsafeM
 
 @_silgen_name("hkdfguard_create_kek")
 func hkdfguard_create_kek(_ service: UnsafePointer<CChar>?) -> Int32
+
+// Read-only: the KEK's public-key fingerprint. Printed by `provision`,
+// checked by `retire`.
+@_silgen_name("hkdfguard_kek_fingerprint")
+func hkdfguard_kek_fingerprint(
+    _ service: UnsafePointer<CChar>?,
+    _ out: UnsafeMutablePointer<UInt8>?,
+    _ outLen: UnsafeMutablePointer<Int32>?
+) -> Int32
 
 // Which keychain this process's KEK items live in (0 legacy, 1
 // data-protection) -- decided by the library from this executable's own
@@ -203,9 +223,15 @@ struct WrapArgs {
     var force: Bool
 }
 
+struct RetireArgs {
+    var serviceName: String
+    var fingerprint: [UInt8]
+}
+
 enum Command {
     case provision(ProvisionArgs)
     case wrap(WrapArgs)
+    case retire(RetireArgs)
     case help
 }
 
@@ -218,13 +244,19 @@ func printUsage() {
           \(programName) provision --service-name|-sn <name>
           \(programName) wrap --key-file-path|-kf <path> --service-name|-sn <name> \\
                                     ( \(dekSourceFlags) ) [--force|-f]
+          \(programName) retire --service-name|-sn <name> --fingerprint|-fp <hex>
 
         Commands:
           provision   create the Secure Enclave KEK for <name> if it does not exist yet.
                       The only command that creates keys; safe to run repeatedly.
+                      Prints the KEK's fingerprint -- record it.
           wrap        wrap the pipeline's 32-byte DEK under the already-provisioned KEK
                       for <name> and write the wrapped payload to <path>. Never creates
                       a KEK -- fails if none exists for <name> (run provision first).
+          retire      delete the KEK for <name>, only if its fingerprint matches <hex>
+                      (64 hex characters, as printed by provision). The only command
+                      that deletes keys. Everything wrapped under that KEK becomes
+                      permanently unrecoverable: migrate to a new service name first.
 
         wrap options (exactly one DEK source is required):
           --key-file-path|-kf <path>  where to write the wrapped payload
@@ -263,9 +295,72 @@ func parseArgs(_ arguments: [String]) throws -> Command {
         return try parseProvision(rest)
     case "wrap":
         return try parseWrap(rest)
+    case "retire":
+        return try parseRetire(rest)
     default:
-        throw CLIError("unknown command \"\(command)\": expected provision or wrap")
+        throw CLIError("unknown command \"\(command)\": expected provision, wrap, or retire")
     }
+}
+
+func parseRetire(_ arguments: [String]) throws -> Command {
+    var serviceName: String?
+    var fingerprint: [UInt8]?
+
+    var iterator = arguments.makeIterator()
+    while let arg = iterator.next() {
+        switch arg {
+        case "--help", "-h":
+            return .help
+        case "--service-name", "-sn":
+            serviceName = try parseServiceName(arg, &iterator)
+        case "--fingerprint", "-fp":
+            guard let value = iterator.next(), !value.isEmpty else {
+                throw CLIError("\(arg) requires a value")
+            }
+            fingerprint = try parseFingerprintHex(value)
+        default:
+            throw CLIError("retire: unrecognized argument: \(arg)")
+        }
+    }
+
+    guard let serviceName else { throw CLIError("retire: missing required --service-name|-sn") }
+    guard let fingerprint else {
+        throw CLIError("retire: missing required --fingerprint|-fp (the 64-hex-character value printed by provision)")
+    }
+    return .retire(RetireArgs(serviceName: serviceName, fingerprint: fingerprint))
+}
+
+let fingerprintLength = 32
+
+// Exactly 64 hex digits, either case. No separators or prefixes: the value
+// is meant to be pasted from provision's output, and a strict format keeps
+// a truncated paste from ever looking valid.
+func parseFingerprintHex(_ text: String) throws -> [UInt8] {
+    let digits = Array(text.utf8)
+    guard digits.count == fingerprintLength * 2 else {
+        throw CLIError("--fingerprint must be exactly \(fingerprintLength * 2) hex characters, got \(digits.count)")
+    }
+    func nibble(_ c: UInt8) -> UInt8? {
+        switch c {
+        case 0x30...0x39: return c - 0x30
+        case 0x41...0x46: return c - 0x41 + 10
+        case 0x61...0x66: return c - 0x61 + 10
+        default: return nil
+        }
+    }
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(fingerprintLength)
+    for i in stride(from: 0, to: digits.count, by: 2) {
+        guard let hi = nibble(digits[i]), let lo = nibble(digits[i + 1]) else {
+            throw CLIError("--fingerprint must contain only hex characters (0-9, a-f)")
+        }
+        bytes.append(hi << 4 | lo)
+    }
+    return bytes
+}
+
+func hexString(_ bytes: [UInt8]) -> String {
+    bytes.map { String(format: "%02x", $0) }.joined()
 }
 
 func parseProvision(_ arguments: [String]) throws -> Command {
@@ -319,6 +414,12 @@ func parseWrap(_ arguments: [String]) throws -> Command {
                 throw CLIError("\(arg) requires a path")
             }
             dekSources.append(.file(value))
+        case "--dek", "-d":
+            // Rejected explicitly, with the reason, rather than falling
+            // through to a generic "unrecognized argument" -- anyone
+            // reaching for the Linux tool's flag should learn why it isn't
+            // here and what to use instead.
+            throw CLIError("\(arg) is not supported: a DEK on the command line is visible via ps and recorded in shell history; use \(dekSourceFlags)")
         default:
             if !arg.hasPrefix("-") {
                 // The key file path used to be positional; say so rather
@@ -406,6 +507,102 @@ func provisionKEK(service: String) throws -> Bool {
         throw CLIError("hkdfguard_create_kek failed: \(describeStatus(createStatus))")
     }
     return true
+}
+
+// The fingerprint of the KEK `service` resolves to, or the library's status
+// code when it can't be read (kekNotFound, keychainAccessDenied, ...).
+func readKekFingerprint(service: String) -> (status: Int32, fingerprint: [UInt8]) {
+    var out = [UInt8](repeating: 0, count: fingerprintLength)
+    var outLen = Int32(fingerprintLength)
+    let status = service.withCString { servicePtr in
+        out.withUnsafeMutableBufferPointer { buf in
+            hkdfguard_kek_fingerprint(servicePtr, buf.baseAddress, &outLen)
+        }
+    }
+    return (status, Array(out.prefix(Int(max(outLen, 0)))))
+}
+
+// MARK: - KEK retirement (the `retire` command only)
+
+// Must equal `hkdfguardKeychainAccount` in HkdfGuardKeyProtectionEnclave.swift.
+// Duplicated rather than exported: the library's C ABI deliberately has no
+// way to address its keychain items directly.
+let kekKeychainAccount = "kek-v1"
+
+// The first non-empty `keychain-access-groups` entry this executable is
+// signed with -- the same rule the library's detectKeychainMode applies.
+func entitledAccessGroup() -> String? {
+    guard let task = SecTaskCreateFromSelf(nil),
+          let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
+          let groups = value as? [String] else {
+        return nil
+    }
+    return groups.first(where: { !$0.isEmpty })
+}
+
+// The query identifying `service`'s KEK item -- mirroring the library's
+// keychainItemAttributes, including an explicit kSecUseDataProtectionKeychain
+// in both modes (an omitted key can resolve to the data-protection keychain
+// on current SDKs). The library's own mode decision and this executable's
+// entitlements must agree; if they don't, something is wrong with the build
+// and nothing is deleted.
+func kekItemQuery(service: String) throws -> [String: Any] {
+    var query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: kekKeychainAccount,
+        kSecAttrSynchronizable as String: false,
+    ]
+    var libraryMode: Int32 = -1
+    _ = hkdfguard_keychain_mode(&libraryMode)
+    switch (libraryMode, entitledAccessGroup()) {
+    case (0, nil):
+        query[kSecUseDataProtectionKeychain as String] = false
+    case (1, let group?):
+        query[kSecUseDataProtectionKeychain as String] = true
+        query[kSecAttrAccessGroup as String] = group
+    default:
+        throw CLIError("the library reports keychain mode \(libraryMode), which does not match this executable's keychain entitlements; refusing to delete anything")
+    }
+    return query
+}
+
+func describeOSStatus(_ status: OSStatus) -> String {
+    if let message = SecCopyErrorMessageString(status, nil) as String? {
+        return "\(message) (OSStatus \(status))"
+    }
+    return "OSStatus \(status)"
+}
+
+// Deletes `service`'s KEK item only if the KEK it currently holds has the
+// fingerprint the operator supplied. A KEK that can't be read -- access
+// denied, corrupt, read failure -- is never deleted: the fingerprint check
+// is the confirmation, and without it there is nothing to confirm against.
+func retireKEK(service: String, expectedFingerprint: [UInt8]) throws {
+    let (status, current) = readKekFingerprint(service: service)
+    switch status {
+    case HKDFGuardStatus.success.rawValue:
+        break
+    case HKDFGuardStatus.kekNotFound.rawValue:
+        throw CLIError("no KEK exists for service \"\(service)\" (keychain: \(keychainModeName())); nothing to retire")
+    default:
+        throw CLIError("cannot read the KEK fingerprint for service \"\(service)\": \(describeStatus(status)); refusing to retire a KEK that cannot be confirmed")
+    }
+    guard current == expectedFingerprint else {
+        throw CLIError("fingerprint mismatch for service \"\(service)\": the current KEK is \(hexString(current)), not \(hexString(expectedFingerprint)); nothing was deleted")
+    }
+
+    let deleteStatus = SecItemDelete(try kekItemQuery(service: service) as CFDictionary)
+    guard deleteStatus == errSecSuccess else {
+        throw CLIError("deleting the KEK for service \"\(service)\" failed: \(describeOSStatus(deleteStatus))")
+    }
+
+    // Confirm through the library, the same lookup every consumer uses.
+    var exists: Int32 = -1
+    let existsStatus = service.withCString { hkdfguard_kek_exists($0, &exists) }
+    guard existsStatus == HKDFGuardStatus.success.rawValue, exists == 0 else {
+        throw CLIError("the KEK for service \"\(service)\" was deleted but the library still reports one (status: \(describeStatus(existsStatus))); investigate before relying on it being gone")
+    }
 }
 
 // MARK: - Wrap
@@ -729,11 +926,29 @@ func writeWrappedKeyFile(path: String, bytes: [UInt8], force: Bool) throws {
 
 func runProvision(_ args: ProvisionArgs) throws {
     try validateServiceCharset(args.serviceName)
-    if try provisionKEK(service: args.serviceName) {
-        print("provisioned KEK for service \"\(args.serviceName)\" (keychain: \(keychainModeName()))")
-    } else {
-        print("KEK already exists for service \"\(args.serviceName)\" (keychain: \(keychainModeName())); nothing to do")
+    let created = try provisionKEK(service: args.serviceName)
+    let (status, fingerprint) = readKekFingerprint(service: args.serviceName)
+    guard status == HKDFGuardStatus.success.rawValue else {
+        throw CLIError("the KEK for service \"\(args.serviceName)\" exists but its fingerprint could not be read: \(describeStatus(status))")
     }
+    if created {
+        print("provisioned KEK for service \"\(args.serviceName)\" (keychain: \(keychainModeName()))")
+        print("fingerprint: \(hexString(fingerprint)) -- record this; retire requires it")
+    } else {
+        // A KEK this operator didn't create could have been planted by another
+        // process; the fingerprint is how to tell.
+        print("KEK already exists for service \"\(args.serviceName)\" (keychain: \(keychainModeName())); nothing to do")
+        print("fingerprint: \(hexString(fingerprint)) -- confirm it matches the one recorded when this service was provisioned")
+    }
+}
+
+func runRetire(_ args: RetireArgs) throws {
+    try validateServiceCharset(args.serviceName)
+    // Validated as ASCII above, so this is the exact form the library stores.
+    let service = args.serviceName.lowercased()
+    try retireKEK(service: service, expectedFingerprint: args.fingerprint)
+    print("retired KEK for service \"\(service)\" (fingerprint \(hexString(args.fingerprint)), keychain: \(keychainModeName()))")
+    print("every payload wrapped under it is now permanently unrecoverable")
 }
 
 func runWrap(_ args: WrapArgs) throws {
@@ -834,6 +1049,8 @@ do {
         runOrExit { try runProvision(args) }
     case .wrap(let args):
         runOrExit { try runWrap(args) }
+    case .retire(let args):
+        runOrExit { try runRetire(args) }
     }
 } catch {
     // An argument-parsing failure: print the error and usage, then exit 2.
