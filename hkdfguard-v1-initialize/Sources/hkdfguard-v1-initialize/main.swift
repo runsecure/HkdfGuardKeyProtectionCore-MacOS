@@ -38,7 +38,7 @@
 //   hkdfguard-v1-initialize provision --service-name|-sn <name>
 //
 //   hkdfguard-v1-initialize retire --service-name|-sn <name> \
-//       --fingerprint|-fp <64 hex chars>
+//       ( --fingerprint|-fp <64 hex chars> | --corrupt )
 //
 //   hkdfguard-v1-initialize wrap \
 //       --key-file-path|-kf <key-file-path> \
@@ -80,6 +80,7 @@
 import Darwin
 import Foundation
 import Security // SecRandomCopyBytes, used by the secure-overwrite passes below
+import CryptoKit // only for retire --corrupt's Secure Enclave liveness probe
 
 // MARK: - Binding directly to the library's C ABI (no bridging header, no
 // module import -- see Package.swift's comment on how this executable
@@ -224,9 +225,15 @@ struct WrapArgs {
     var force: Bool
 }
 
+// How the operator confirms which KEK item `retire` may delete.
+enum RetireConfirmation {
+    case fingerprint([UInt8]) // --fingerprint: a valid KEK, by its public-key fingerprint
+    case corrupt              // --corrupt: an item the library reports as kekCorrupted
+}
+
 struct RetireArgs {
     var serviceName: String
-    var fingerprint: [UInt8]
+    var confirmation: RetireConfirmation
 }
 
 enum Command {
@@ -245,7 +252,7 @@ func printUsage() {
           \(programName) provision --service-name|-sn <name>
           \(programName) wrap --key-file-path|-kf <path> --service-name|-sn <name> \\
                                     ( \(dekSourceFlags) ) [--force|-f]
-          \(programName) retire --service-name|-sn <name> --fingerprint|-fp <hex>
+          \(programName) retire --service-name|-sn <name> ( --fingerprint|-fp <hex> | --corrupt )
 
         Commands:
           provision   create the Secure Enclave KEK for <name> if it does not exist yet.
@@ -258,6 +265,10 @@ func printUsage() {
                       (64 hex characters, as printed by provision). The only command
                       that deletes keys. Everything wrapped under that KEK becomes
                       permanently unrecoverable: migrate to a new service name first.
+                      With --corrupt instead, deletes the item only if the library
+                      reports it as corrupt (-11) and the Secure Enclave is proven
+                      usable in this session, so a healthy KEK that merely could not
+                      be loaded right now is never mistaken for a corrupt one.
 
         wrap options (exactly one DEK source is required):
           --key-file-path|-kf <path>  where to write the wrapped payload
@@ -306,6 +317,7 @@ func parseArgs(_ arguments: [String]) throws -> Command {
 func parseRetire(_ arguments: [String]) throws -> Command {
     var serviceName: String?
     var fingerprint: [UInt8]?
+    var corrupt = false
 
     var iterator = arguments.makeIterator()
     while let arg = iterator.next() {
@@ -319,16 +331,24 @@ func parseRetire(_ arguments: [String]) throws -> Command {
                 throw CLIError("\(arg) requires a value")
             }
             fingerprint = try parseFingerprintHex(value)
+        case "--corrupt":
+            corrupt = true
         default:
             throw CLIError("retire: unrecognized argument: \(arg)")
         }
     }
 
     guard let serviceName else { throw CLIError("retire: missing required --service-name|-sn") }
-    guard let fingerprint else {
-        throw CLIError("retire: missing required --fingerprint|-fp (the 64-hex-character value printed by provision)")
+    switch (fingerprint, corrupt) {
+    case (let fingerprint?, false):
+        return .retire(RetireArgs(serviceName: serviceName, confirmation: .fingerprint(fingerprint)))
+    case (nil, true):
+        return .retire(RetireArgs(serviceName: serviceName, confirmation: .corrupt))
+    case (_?, true):
+        throw CLIError("retire: --fingerprint and --corrupt are mutually exclusive: a KEK with a readable fingerprint is not corrupt")
+    case (nil, false):
+        throw CLIError("retire: missing required --fingerprint|-fp (the 64-hex-character value printed by provision), or --corrupt for an item the library reports as corrupt")
     }
-    return .retire(RetireArgs(serviceName: serviceName, fingerprint: fingerprint))
 }
 
 let fingerprintLength = 32
@@ -586,6 +606,8 @@ func retireKEK(service: String, expectedFingerprint: [UInt8]) throws {
         break
     case HKDFGuardStatus.kekNotFound.rawValue:
         throw CLIError("no KEK exists for service \"\(service)\" (keychain: \(keychainModeName())); nothing to retire")
+    case HKDFGuardStatus.kekCorrupted.rawValue:
+        throw CLIError("the KEK item for service \"\(service)\" cannot be reconstructed into a key, so it has no fingerprint to confirm; if it is genuinely corrupt, retire it with --corrupt")
     default:
         throw CLIError("cannot read the KEK fingerprint for service \"\(service)\": \(describeStatus(status)); refusing to retire a KEK that cannot be confirmed")
     }
@@ -593,15 +615,78 @@ func retireKEK(service: String, expectedFingerprint: [UInt8]) throws {
         throw CLIError("fingerprint mismatch for service \"\(service)\": the current KEK is \(hexString(current)), not \(hexString(expectedFingerprint)); nothing was deleted")
     }
 
+    try deleteKEKItemAndConfirm(service: service)
+}
+
+// The library's kek_exists status for `service` (exists flag discarded when
+// the status isn't success).
+func kekExistsStatus(service: String) -> (status: Int32, exists: Bool) {
+    var exists: Int32 = 0
+    let status = service.withCString { hkdfguard_kek_exists($0, &exists) }
+    return (status, exists != 0)
+}
+
+// Proves the Secure Enclave and this user's keybag are usable in this
+// session, by creating a throwaway key under the library's own access
+// policy, reconstructing it from its data representation exactly as the
+// library reconstructs a stored KEK, and using it once. Nothing is stored.
+// Without this, a healthy KEK that merely failed to load right now (locked
+// session, SSH with no GUI login, enclave unavailable) would be
+// indistinguishable from a corrupt item and could be deleted.
+func secureEnclaveIsUsableNow() -> Bool {
+    guard SecureEnclave.isAvailable,
+          let access = SecAccessControlCreateWithFlags(
+              nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage], nil
+          ),
+          let probe = try? SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access),
+          let reloaded = try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: probe.dataRepresentation)
+    else {
+        return false
+    }
+    let peer = P256.KeyAgreement.PrivateKey().publicKey
+    return (try? reloaded.sharedSecretFromKeyAgreement(with: peer)) != nil
+}
+
+// Deletes `service`'s KEK item only if the library reports it as corrupt
+// (kekCorrupted, -11) -- present but not reconstructable -- and only after
+// proving the enclave works in this session, so the -11 reflects the item
+// itself. A valid KEK, a missing one, or one the keychain won't let this
+// process read is never deleted here.
+func retireCorruptKEK(service: String) throws {
+    let (status, exists) = kekExistsStatus(service: service)
+    switch status {
+    case HKDFGuardStatus.kekCorrupted.rawValue:
+        break
+    case HKDFGuardStatus.success.rawValue where exists:
+        throw CLIError("the KEK for service \"\(service)\" is valid, not corrupt; nothing was deleted -- retire a valid KEK with --fingerprint")
+    case HKDFGuardStatus.success.rawValue:
+        throw CLIError("no KEK exists for service \"\(service)\" (keychain: \(keychainModeName())); nothing to retire")
+    default:
+        throw CLIError("cannot inspect the KEK item for service \"\(service)\": \(describeStatus(status)); refusing to retire an item that cannot be confirmed corrupt")
+    }
+
+    guard secureEnclaveIsUsableNow() else {
+        throw CLIError("the Secure Enclave is not usable in this session (locked, no GUI login, or unavailable), so a healthy KEK can look corrupt here; nothing was deleted -- rerun from an unlocked, logged-in session")
+    }
+    // Re-checked after the probe: the item must still be reported corrupt.
+    guard kekExistsStatus(service: service).status == HKDFGuardStatus.kekCorrupted.rawValue else {
+        throw CLIError("the KEK item for service \"\(service)\" is no longer reported as corrupt; nothing was deleted -- inspect it again before retiring")
+    }
+
+    try deleteKEKItemAndConfirm(service: service)
+}
+
+// Deletes `service`'s KEK item in this process's keychain mode, then
+// confirms through the library -- the same lookup every consumer uses --
+// that no item remains.
+func deleteKEKItemAndConfirm(service: String) throws {
     let deleteStatus = SecItemDelete(try kekItemQuery(service: service) as CFDictionary)
     guard deleteStatus == errSecSuccess else {
         throw CLIError("deleting the KEK for service \"\(service)\" failed: \(describeOSStatus(deleteStatus))")
     }
 
-    // Confirm through the library, the same lookup every consumer uses.
-    var exists: Int32 = -1
-    let existsStatus = service.withCString { hkdfguard_kek_exists($0, &exists) }
-    guard existsStatus == HKDFGuardStatus.success.rawValue, exists == 0 else {
+    let (existsStatus, exists) = kekExistsStatus(service: service)
+    guard existsStatus == HKDFGuardStatus.success.rawValue, !exists else {
         throw CLIError("the KEK for service \"\(service)\" was deleted but the library still reports one (status: \(describeStatus(existsStatus))); investigate before relying on it being gone")
     }
 }
@@ -954,9 +1039,15 @@ func runRetire(_ args: RetireArgs) throws {
     try validateServiceCharset(args.serviceName)
     // Validated as ASCII above, so this is the exact form the library stores.
     let service = args.serviceName.lowercased()
-    try retireKEK(service: service, expectedFingerprint: args.fingerprint)
-    print("retired KEK for service \"\(service)\" (fingerprint \(hexString(args.fingerprint)), keychain: \(keychainModeName()))")
-    print("every payload wrapped under it is now permanently unrecoverable")
+    switch args.confirmation {
+    case .fingerprint(let fingerprint):
+        try retireKEK(service: service, expectedFingerprint: fingerprint)
+        print("retired KEK for service \"\(service)\" (fingerprint \(hexString(fingerprint)), keychain: \(keychainModeName()))")
+        print("every payload wrapped under it is now permanently unrecoverable")
+    case .corrupt:
+        try retireCorruptKEK(service: service)
+        print("retired corrupt KEK item for service \"\(service)\" (keychain: \(keychainModeName())); service \"\(service)\" can now be provisioned again")
+    }
 }
 
 func runWrap(_ args: WrapArgs) throws {

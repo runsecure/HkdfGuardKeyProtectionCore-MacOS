@@ -938,6 +938,35 @@ struct HkdfGuardCommandLineToolTests {
         #expect(Self.libraryReportsKek(service: service) == false)
     }
 
+    @Test(.enabled(if: dataProtectionRoundTripEnabled && SecureEnclave.isAvailable, "requires the entitled HkdfGuardTestHost and the bundled CLI (data-protection mode)"))
+    func bundledCliRetiresCorruptDataProtectionItem() throws {
+        // The case --corrupt exists for: a corrupt data-protection item is
+        // invisible to Keychain Access and `security`, and has no
+        // fingerprint for the --fingerprint path to confirm.
+        let service = "com.hkdfguard.tests.cli.dataprotection.retire.corrupt"
+        defer { Self.deleteKEKInProcess(service: service) }
+        guard case .dataProtection(let accessGroup) = hkdfguardKeychainMode else { return }
+
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: hkdfguardKeychainAccount,
+            kSecAttrSynchronizable as String: false,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecValueData as String: Data("not-a-key-blob".utf8),
+        ]
+        #expect(SecItemAdd(item as CFDictionary, nil) == errSecSuccess)
+        var exists: Int32 = -1
+        #expect(service.withCString { hkdfguard_kek_exists(servicePtr: $0, outExists: &exists) } == -11)
+
+        let cli = URL(fileURLWithPath: Self.bundledCLIPath)
+        let retire = try Self.run(cli, ["retire", "--service-name", service, "--corrupt"])
+        #expect(retire.exitCode == 0, "retire --corrupt failed: \(retire.stderr)")
+        #expect(retire.stdout.contains("keychain: data-protection"), "stdout: \(retire.stdout)")
+        #expect(Self.libraryReportsKek(service: service) == false)
+    }
+
     /// Whether the library, in this host's mode, sees a KEK for `service`.
     /// `nil` when the lookup itself failed.
     private static func libraryReportsKek(service: String) -> Bool? {
@@ -999,6 +1028,60 @@ struct HkdfGuardCommandLineToolTests {
         #expect(!Self.kekItemExists(service: service))
     }
 
+    /// Plants a legacy-keychain item under `service` whose data is not a
+    /// Secure Enclave key, so the library reports it as kekCorrupted (-11).
+    /// The item is created by `security`, not by the CLI, so the CLI reading
+    /// it is a cross-process legacy access: even with `-A`, it was observed
+    /// to raise an interactive keychain prompt. Tests using this are gated
+    /// on the interactive opt-in for that reason.
+    private static func plantCorruptLegacyItem(service: String) throws {
+        let result = try run(
+            URL(fileURLWithPath: "/usr/bin/security"),
+            ["add-generic-password", "-s", service.lowercased(), "-a", hkdfguardKeychainAccount, "-w", "not-a-key-blob", "-A"]
+        )
+        #expect(result.exitCode == 0, "security add-generic-password failed: \(result.stderr)")
+    }
+
+    @Test(.enabled(if: legacyCrossProcessRoundTripEnabled && SecureEnclave.isAvailable, interactiveKeychainAndSecureEnclaveComment))
+    func cliRetireCorruptDeletesOnlyACorruptItem() throws {
+        let service = "com.hkdfguard.tests.cli.retire.corrupt"
+        defer { Self.deleteKEK(service: service) }
+        try Self.plantCorruptLegacyItem(service: service)
+
+        // No fingerprint exists to confirm, so the fingerprint path refuses
+        // and points at --corrupt.
+        let byFingerprint = try Self.runCLI(["retire", "-sn", service, "-fp", String(repeating: "ab", count: 32)])
+        #expect(byFingerprint.exitCode == 1)
+        #expect(byFingerprint.stderr.contains("--corrupt"), "stderr: \(byFingerprint.stderr)")
+        #expect(Self.kekItemExists(service: service))
+
+        let retired = try Self.runCLI(["retire", "-sn", service, "--corrupt"])
+        #expect(retired.exitCode == 0, "retire --corrupt failed: \(retired.stderr)")
+        #expect(retired.stdout.contains("retired corrupt KEK item"), "stdout: \(retired.stdout)")
+        #expect(!Self.kekItemExists(service: service))
+    }
+
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliRetireCorruptRefusesAValidKek() throws {
+        let service = "com.hkdfguard.tests.cli.retire.corrupt.valid"
+        defer { Self.deleteKEK(service: service) }
+        try Self.provision(service: service)
+
+        let result = try Self.runCLI(["retire", "-sn", service, "--corrupt"])
+        #expect(result.exitCode == 1)
+        #expect(result.stderr.contains("is valid, not corrupt"), "stderr: \(result.stderr)")
+        #expect(Self.kekItemExists(service: service), "a valid KEK must never be deleted by --corrupt")
+    }
+
+    @Test(.enabled(if: SecureEnclave.isAvailable, secureEnclaveAvailableComment))
+    func cliRetireCorruptWithoutItemReportsNothingToRetire() throws {
+        let service = "com.hkdfguard.tests.cli.retire.corrupt.absent"
+        defer { Self.deleteKEK(service: service) }
+        let result = try Self.runCLI(["retire", "-sn", service, "--corrupt"])
+        #expect(result.exitCode == 1)
+        #expect(result.stderr.contains("nothing to retire"), "stderr: \(result.stderr)")
+    }
+
     @Test func cliRetireRejectsMalformedOrMissingFingerprint() throws {
         let service = "com.hkdfguard.tests.cli.retire.malformed"
         let cases: [(args: [String], message: String)] = [
@@ -1006,6 +1089,7 @@ struct HkdfGuardCommandLineToolTests {
             (["--fingerprint", "abc"], "exactly 64 hex characters"),
             (["--fingerprint", String(repeating: "zz", count: 32)], "only hex characters"),
             (["--fingerprint", String(repeating: "ab", count: 33)], "exactly 64 hex characters"),
+            (["--fingerprint", String(repeating: "ab", count: 32), "--corrupt"], "mutually exclusive"),
         ]
         for testCase in cases {
             let result = try Self.runCLI(["retire", "--service-name", service] + testCase.args)

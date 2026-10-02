@@ -204,7 +204,7 @@ hkdfguard-v1-initialize wrap --key-file-path|-kf <path> \
                              [--force|-f]
 
 hkdfguard-v1-initialize retire --service-name|-sn <name> \
-                               --fingerprint|-fp <64 hex chars>
+                               ( --fingerprint|-fp <64 hex chars> | --corrupt )
 ```
 
 - **`provision`** creates the KEK for `<name>` if it doesn't exist. The only
@@ -222,6 +222,18 @@ hkdfguard-v1-initialize retire --service-name|-sn <name> \
   data-protection) and refuses if the library's mode and the executable's
   entitlements disagree. See "If a KEK is compromised" above for when to
   use it.
+- **`retire --corrupt`** removes an item the library reports as
+  `kekCorrupted` (`-11`) — present but not reconstructable into a key, so
+  it has no fingerprint to confirm. It deletes only when the status is
+  exactly `-11`, and only after proving the Secure Enclave works in this
+  session: it creates a throwaway, never-stored enclave key under the same
+  access policy, reconstructs it from its data representation as the
+  library does, and uses it once. Otherwise a healthy KEK that merely
+  failed to load (locked session, SSH without a GUI login) could look
+  corrupt and be deleted. A valid KEK, a missing one, or one the keychain
+  won't let it read (`-17`, `-18`) is never deleted. Afterwards the service
+  can be provisioned again. `--fingerprint` and `--corrupt` are mutually
+  exclusive.
 - **`wrap`** wraps the pipeline's existing 32-byte DEK — base64, read from
   **stdin** (`--dek-stdin`, trailing newline fine) or a **file**
   (`--dek-file`) — under the already-provisioned KEK and writes the 156-byte
@@ -500,14 +512,17 @@ differently-signed host unwraps it through the library **with no
 interactive prompt** — the production topology, with access granted by
 securityd from the two signed identities alone.
 
-Last run to a full pass (68 tests, both suites, no failures) on real
+Last run to a full pass (73 tests, both suites, no failures) on real
 Secure Enclave hardware, under both the unhosted and the hosted scheme.
 The hosted run included
 `dataProtectionModeStoresItemsOnlyInTheDataProtectionKeychain` (see
 "Keychain modes" above), `bundledCliProvisionsAndWrapsInDataProtectionModeAndEntitledHostUnwraps`
-(the end-to-end cross-process round trip), and `bundledCliRetiresDataProtectionKek`.
-Skipped by design: the four opt-in interactive legacy round trips, and the
-one test that only makes sense in an unentitled host.
+(the end-to-end cross-process round trip), `bundledCliRetiresDataProtectionKek`,
+and `bundledCliRetiresCorruptDataProtectionItem`. Skipped by design: the
+five opt-in interactive legacy cross-process tests (including
+`cliRetireCorruptDeletesOnlyACorruptItem`, which plants a corrupt item from
+another process and so raises a keychain prompt), and the one test that
+only makes sense in an unentitled host.
 
 The CLI suite runs an incremental build of the dylib and the CLI once per
 test run, so it always tests the current source rather than whatever
